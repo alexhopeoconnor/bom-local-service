@@ -2,7 +2,6 @@ using BomLocalService.Models;
 using BomLocalService.Services.Interfaces;
 using BomLocalService.Utilities;
 using Microsoft.Playwright;
-using System.Collections.Concurrent;
 
 namespace BomLocalService.Services;
 
@@ -13,9 +12,9 @@ public class BomRadarService : IBomRadarService, IDisposable
     private readonly IBrowserService _browserService;
     private readonly IScrapingService _scrapingService;
     private readonly IDebugService _debugService;
+    private readonly IConfiguration _configuration;
     private readonly double _cacheExpirationMinutes;
     private readonly int _cacheManagementCheckIntervalMinutes;
-    private readonly ConcurrentDictionary<string, string> _activeCacheFolders = new(); // locationKey -> cacheFolderPath
 
     public BomRadarService(
         ILogger<BomRadarService> logger,
@@ -30,6 +29,7 @@ public class BomRadarService : IBomRadarService, IDisposable
         _browserService = browserService;
         _scrapingService = scrapingService;
         _debugService = debugService;
+        _configuration = configuration;
         _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 15.5);
         _cacheManagementCheckIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
     }
@@ -37,8 +37,8 @@ public class BomRadarService : IBomRadarService, IDisposable
     public async Task<RadarResponse?> GetCachedRadarAsync(string suburb, string state, CancellationToken cancellationToken = default)
     {
         var locationKey = LocationHelper.GetLocationKey(suburb, state);
-        var excludeFolder = _activeCacheFolders.TryGetValue(locationKey, out var activeFolder) ? activeFolder : null;
-        var (cacheFolderPath, cachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, excludeFolder, cancellationToken);
+        var excludeFolder = _cacheService.GetActiveCacheFolder(locationKey);
+        var (cacheFolderPath, cachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, excludeFolder, cancellationToken);
         
         if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
         {
@@ -54,7 +54,7 @@ public class BomRadarService : IBomRadarService, IDisposable
         // Determine cache state
         var isValid = cachedMetadata != null && _cacheService.IsCacheValid(cachedMetadata);
         var cacheExpiresAt = cachedMetadata != null ? cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes) : (DateTime?)null;
-        var isUpdating = _activeCacheFolders.ContainsKey(locationKey);
+        var isUpdating = _cacheService.IsLocationUpdating(locationKey);
         
         return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating, _cacheManagementCheckIntervalMinutes);
     }
@@ -83,9 +83,9 @@ public class BomRadarService : IBomRadarService, IDisposable
         var locationKey = LocationHelper.GetLocationKey(suburb, state);
         
         // Check if an update is already in progress
-        var isAlreadyUpdating = _activeCacheFolders.ContainsKey(locationKey);
-        var excludeFolder = _activeCacheFolders.TryGetValue(locationKey, out var activeFolder) ? activeFolder : null;
-        var (cacheFolderPath, cachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, excludeFolder, cancellationToken);
+        var isAlreadyUpdating = _cacheService.IsLocationUpdating(locationKey);
+        var excludeFolder = _cacheService.GetActiveCacheFolder(locationKey);
+        var (cacheFolderPath, cachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, excludeFolder, cancellationToken);
         
         if (isAlreadyUpdating)
         {
@@ -170,14 +170,14 @@ public class BomRadarService : IBomRadarService, IDisposable
 
         // Check cache FIRST, before acquiring semaphore (cached requests shouldn't block)
         var locationKey = LocationHelper.GetLocationKey(suburb, state);
-        var excludeFolder = _activeCacheFolders.TryGetValue(locationKey, out var activeFolder) ? activeFolder : null;
-        var isUpdating = !string.IsNullOrEmpty(activeFolder);
-        var (cacheFolderPath, cachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, excludeFolder, cancellationToken);
+        var excludeFolder = _cacheService.GetActiveCacheFolder(locationKey);
+        var isUpdating = _cacheService.IsLocationUpdating(locationKey);
+        var (cacheFolderPath, cachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, excludeFolder, cancellationToken);
         
         // If there's an active update in progress, return existing cache (if available) with IsUpdating=true
         if (isUpdating)
         {
-            if (!string.IsNullOrEmpty(cacheFolderPath) && Directory.Exists(cacheFolderPath) && CacheHelper.IsCacheFolderComplete(cacheFolderPath))
+            if (!string.IsNullOrEmpty(cacheFolderPath) && Directory.Exists(cacheFolderPath) && CacheHelper.IsCacheFolderComplete(cacheFolderPath, _configuration))
             {
                 _logger.LogInformation("Cache update in progress for {Suburb}, {State}, returning existing cached data", suburb, state);
                 var frames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
@@ -192,7 +192,7 @@ public class BomRadarService : IBomRadarService, IDisposable
             }
         }
         
-        if (!string.IsNullOrEmpty(cacheFolderPath) && Directory.Exists(cacheFolderPath) && cachedMetadata != null && CacheHelper.IsCacheFolderComplete(cacheFolderPath))
+        if (!string.IsNullOrEmpty(cacheFolderPath) && Directory.Exists(cacheFolderPath) && cachedMetadata != null && CacheHelper.IsCacheFolderComplete(cacheFolderPath, _configuration))
         {
             var isValid = _cacheService.IsCacheValid(cachedMetadata);
             if (isValid)
@@ -231,39 +231,21 @@ public class BomRadarService : IBomRadarService, IDisposable
         {
             // Create cache folder and track it before double-checking
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-            newCacheFolderPath = FilePathHelper.GetCacheFolderPath(_cacheService.GetCacheDirectory(), suburb, state, timestamp);
-            Directory.CreateDirectory(newCacheFolderPath);
+            newCacheFolderPath = _cacheService.CreateCacheFolder(suburb, state, timestamp);
             
             // Track this folder as being written to
-            _activeCacheFolders[locationKey] = newCacheFolderPath;
-            _logger.LogDebug("Tracking cache folder being written to: {Folder} for {Location}", newCacheFolderPath, locationKey);
+            _cacheService.SetActiveCacheFolder(locationKey, newCacheFolderPath);
             
             // Double-check cache after acquiring semaphore (another request might have just created it)
             // Exclude the folder we're about to write to
-            var (recheckCacheFolderPath, recheckCachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, newCacheFolderPath, cancellationToken);
+            var (recheckCacheFolderPath, recheckCachedMetadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, newCacheFolderPath, cancellationToken);
             if (!string.IsNullOrEmpty(recheckCacheFolderPath) && Directory.Exists(recheckCacheFolderPath) && recheckCachedMetadata != null && _cacheService.IsCacheValid(recheckCachedMetadata))
             {
                 // Remove from tracking since we're not using this folder
-                _activeCacheFolders.TryRemove(locationKey, out _);
+                _cacheService.ClearActiveCacheFolder(locationKey);
                 
                 // Clean up the empty folder we created since we're not using it
-                if (!string.IsNullOrEmpty(newCacheFolderPath) && Directory.Exists(newCacheFolderPath))
-                {
-                    try
-                    {
-                        // Check if folder is empty (only . and ..)
-                        var files = Directory.GetFiles(newCacheFolderPath);
-                        if (files.Length == 0)
-                        {
-                            Directory.Delete(newCacheFolderPath, recursive: true);
-                            _logger.LogDebug("Cleaned up empty cache folder that was created but not used: {Folder}", newCacheFolderPath);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to clean up empty cache folder: {Folder}", newCacheFolderPath);
-                    }
-                }
+                _cacheService.TryDeleteEmptyCacheFolder(newCacheFolderPath);
                 
                 _logger.LogInformation("Cache became valid while waiting for semaphore, returning cached screenshots");
                 var recheckFrames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
@@ -291,8 +273,7 @@ public class BomRadarService : IBomRadarService, IDisposable
                     cancellationToken);
                 
                 // Remove from active tracking once complete
-                _activeCacheFolders.TryRemove(locationKey, out _);
-                _logger.LogDebug("Cache folder complete, removed from active tracking: {Folder}", newCacheFolderPath);
+                _cacheService.ClearActiveCacheFolder(locationKey);
                 
                 // Update result with cache state
                 result.IsUpdating = false;
@@ -320,23 +301,12 @@ public class BomRadarService : IBomRadarService, IDisposable
         finally
         {
             // Always remove from active tracking, even on error
-            _activeCacheFolders.TryRemove(locationKey, out _);
+            _cacheService.ClearActiveCacheFolder(locationKey);
             
             // Clean up incomplete cache folder if error occurred
-            if (!string.IsNullOrEmpty(newCacheFolderPath) && Directory.Exists(newCacheFolderPath))
+            if (!string.IsNullOrEmpty(newCacheFolderPath) && _cacheService.TryDeleteIncompleteCacheFolder(newCacheFolderPath))
             {
-                try
-                {
-                    if (!CacheHelper.IsCacheFolderComplete(newCacheFolderPath))
-                    {
-                        Directory.Delete(newCacheFolderPath, recursive: true);
-                        _logger.LogWarning("Cleaned up incomplete cache folder due to error: {Folder}", newCacheFolderPath);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to clean up incomplete cache folder: {Folder}", newCacheFolderPath);
-                }
+                _logger.LogWarning("Cleaned up incomplete cache folder due to error: {Folder}", newCacheFolderPath);
             }
             
             // Clean up empty debug folder if we returned early without scraping
@@ -365,8 +335,8 @@ public class BomRadarService : IBomRadarService, IDisposable
     {
         // Return cached metadata if available, otherwise return null
         var locationKey = LocationHelper.GetLocationKey(suburb, state);
-        var excludeFolder = _activeCacheFolders.TryGetValue(locationKey, out var activeFolder) ? activeFolder : null;
-        var (_, metadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, excludeFolder, cancellationToken);
+        var excludeFolder = _cacheService.GetActiveCacheFolder(locationKey);
+        var (_, metadata) = await _cacheService.GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, excludeFolder, cancellationToken);
         
         if (metadata != null)
         {
@@ -387,6 +357,253 @@ public class BomRadarService : IBomRadarService, IDisposable
     {
         return _cacheService.DeleteCachedLocationAsync(suburb, state, cancellationToken);
     }
+
+    public async Task<CacheRange> GetCacheRangeAsync(string suburb, string state, CancellationToken cancellationToken = default)
+    {
+        var allFolders = await _cacheService.GetAllCacheFoldersAsync(suburb, state, cancellationToken);
+        
+        if (allFolders.Count == 0)
+        {
+            return new CacheRange
+            {
+                TotalCacheFolders = 0
+            };
+        }
+        
+        var oldest = allFolders.First();
+        var newest = allFolders.Last();
+        
+        var timeSpanMinutes = allFolders.Count >= 2
+            ? (int?)(newest.CacheTimestamp - oldest.CacheTimestamp).TotalMinutes
+            : null;
+        
+        return new CacheRange
+        {
+            OldestCache = oldest,
+            NewestCache = newest,
+            TotalCacheFolders = allFolders.Count,
+            TimeSpanMinutes = timeSpanMinutes
+        };
+    }
+
+    public async Task<RadarTimeSeriesResponse> GetRadarTimeSeriesAsync(
+        string suburb, 
+        string state, 
+        DateTime? startTime, 
+        DateTime? endTime, 
+        CancellationToken cancellationToken = default)
+    {
+        var allFolders = await _cacheService.GetAllCacheFoldersAsync(suburb, state, cancellationToken);
+        
+        // Filter by time range if provided
+        var filteredFolders = allFolders.AsEnumerable();
+        if (startTime.HasValue)
+        {
+            filteredFolders = filteredFolders.Where(f => f.CacheTimestamp >= startTime.Value);
+        }
+        if (endTime.HasValue)
+        {
+            filteredFolders = filteredFolders.Where(f => f.CacheTimestamp <= endTime.Value);
+        }
+        
+        var result = new List<RadarCacheFolderFrames>();
+        var encodedSuburb = Uri.EscapeDataString(suburb);
+        var encodedState = Uri.EscapeDataString(state);
+        
+        // Process folders in reverse chronological order (newest first) so we keep frames from most recent cache folders
+        // Use a HashSet to track unique absolute observation times we've already seen
+        var seenAbsoluteTimes = new HashSet<DateTime>();
+        
+        foreach (var folderInfo in filteredFolders.OrderByDescending(f => f.CacheTimestamp))
+        {
+            // Load frames from this folder's radar subfolder
+            var cachedFrames = await _cacheService.GetFramesFromCacheFolderAsync(
+                suburb, 
+                state, 
+                folderInfo.FolderName, 
+                CachedDataType.Radar, 
+                cancellationToken);
+            
+            var radarFrames = cachedFrames.Cast<RadarFrame>()
+                .OrderBy(f => f.FrameIndex) // Ensure frames are sorted by index
+                .ToList();
+            
+            if (radarFrames.Count > 0)
+            {
+                // Generate URLs and calculate absolute observation times for each frame
+                var uniqueFrames = new List<RadarFrame>();
+                
+                foreach (var frame in radarFrames)
+                {
+                    frame.ImageUrl = $"/api/radar/{encodedSuburb}/{encodedState}/frame/{frame.FrameIndex}?cacheFolder={Uri.EscapeDataString(folderInfo.FolderName)}";
+                    
+                    // Calculate absolute observation time for this frame
+                    // minutesAgo is relative to the cache folder's observation time
+                    // Validate that ObservationTime is reasonable (not default/min value)
+                    if (folderInfo.ObservationTime > DateTime.MinValue.AddYears(1) && frame.MinutesAgo >= 0)
+                    {
+                        frame.AbsoluteObservationTime = folderInfo.ObservationTime.AddMinutes(-frame.MinutesAgo);
+                        
+                        // Only include frames with unique absolute observation times
+                        // Since we process folders newest-first, this ensures we keep frames from the most recent cache folder
+                        if (frame.AbsoluteObservationTime.HasValue && !seenAbsoluteTimes.Contains(frame.AbsoluteObservationTime.Value))
+                        {
+                            seenAbsoluteTimes.Add(frame.AbsoluteObservationTime.Value);
+                            uniqueFrames.Add(frame);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Skipping frame {FrameIndex} from folder {FolderName}: Invalid ObservationTime ({ObservationTime}) or MinutesAgo ({MinutesAgo})", 
+                            frame.FrameIndex, folderInfo.FolderName, folderInfo.ObservationTime, frame.MinutesAgo);
+                    }
+                }
+                
+                // Only add folder to result if it has unique frames
+                if (uniqueFrames.Count > 0)
+                {
+                    // Sort frames within folder by absolute observation time (oldest first) for slideshow
+                    uniqueFrames = uniqueFrames
+                        .OrderBy(f => f.AbsoluteObservationTime ?? DateTime.MaxValue)
+                        .ToList();
+                    
+                    result.Add(new RadarCacheFolderFrames
+                    {
+                        CacheFolderName = folderInfo.FolderName,
+                        CacheTimestamp = folderInfo.CacheTimestamp,
+                        ObservationTime = folderInfo.ObservationTime,
+                        Frames = uniqueFrames
+                    });
+                }
+            }
+        }
+        
+        // Flatten all frames, sort by absolute observation time, and filter out frames that are too close together
+        // Frames should be at least 4 minutes apart, and must be in strict chronological order
+        var allFrames = result.SelectMany(r => r.Frames.Select(f => new { Folder = r, Frame = f }))
+            .Where(x => x.Frame.AbsoluteObservationTime.HasValue)
+            .OrderBy(x => x.Frame.AbsoluteObservationTime!.Value)
+            .ToList();
+        
+        // Filter out frames that are too close together (< 4 minutes) or out of order
+        // Track which absolute times passed the filter
+        var acceptedAbsoluteTimes = new HashSet<DateTime>();
+        DateTime? lastAbsoluteTime = null;
+        const int minMinutesBetweenFrames = 4;
+        
+        foreach (var item in allFrames)
+        {
+            var absoluteTime = item.Frame.AbsoluteObservationTime!.Value;
+            
+            // Skip if this frame is older than the previous one (shouldn't happen after sorting, but safety check)
+            if (lastAbsoluteTime.HasValue && absoluteTime < lastAbsoluteTime.Value)
+            {
+                _logger.LogWarning("Skipping frame {FrameIndex} from folder {FolderName}: absolute time {AbsoluteTime} is older than previous {PreviousTime}",
+                    item.Frame.FrameIndex, item.Folder.CacheFolderName, absoluteTime, lastAbsoluteTime.Value);
+                continue;
+            }
+            
+            // Skip if this frame is too close to the previous one (< 4 minutes)
+            if (lastAbsoluteTime.HasValue)
+            {
+                var timeDiff = absoluteTime - lastAbsoluteTime.Value;
+                if (timeDiff.TotalMinutes < minMinutesBetweenFrames)
+                {
+                    _logger.LogDebug("Skipping frame {FrameIndex} from folder {FolderName}: only {Minutes} minutes after previous frame (minimum {MinMinutes})",
+                        item.Frame.FrameIndex, item.Folder.CacheFolderName, timeDiff.TotalMinutes, minMinutesBetweenFrames);
+                    continue;
+                }
+            }
+            
+            acceptedAbsoluteTimes.Add(absoluteTime);
+            lastAbsoluteTime = absoluteTime;
+        }
+        
+        // Prune frames from original folder structure - only keep frames that passed the filter
+        // This preserves the original folder order and structure
+        foreach (var folder in result)
+        {
+            folder.Frames = folder.Frames
+                .Where(f => f.AbsoluteObservationTime.HasValue && acceptedAbsoluteTimes.Contains(f.AbsoluteObservationTime.Value))
+                .OrderBy(f => f.AbsoluteObservationTime!.Value) // Sort within folder by absolute time
+                .ToList();
+        }
+        
+        // Remove empty folders and sort folders to ensure chronological order when client flattens
+        // To guarantee chronological order when iterating folder-by-folder, we need to ensure
+        // that the LAST frame of folder N is before the FIRST frame of folder N+1
+        // Since we've already deduplicated and filtered, folders should not have overlapping frames
+        // Sort by earliest frame - if folders overlap, the deduplication should have prevented it
+        result = result
+            .Where(r => r.Frames.Count > 0) // Only include folders that still have frames after filtering
+            .OrderBy(r => r.Frames
+                .Where(f => f.AbsoluteObservationTime.HasValue)
+                .Select(f => f.AbsoluteObservationTime!.Value)
+                .DefaultIfEmpty(DateTime.MaxValue)
+                .Min()) // Sort by earliest frame
+            .ToList();
+        
+        // Validate that folders don't overlap (last frame of N < first frame of N+1)
+        for (int i = 0; i < result.Count - 1; i++)
+        {
+            var currentFolder = result[i];
+            var nextFolder = result[i + 1];
+            
+            var currentLast = currentFolder.Frames
+                .Where(f => f.AbsoluteObservationTime.HasValue)
+                .Select(f => f.AbsoluteObservationTime!.Value)
+                .DefaultIfEmpty(DateTime.MinValue)
+                .Max();
+            
+            var nextFirst = nextFolder.Frames
+                .Where(f => f.AbsoluteObservationTime.HasValue)
+                .Select(f => f.AbsoluteObservationTime!.Value)
+                .DefaultIfEmpty(DateTime.MaxValue)
+                .Min();
+            
+            if (currentLast >= nextFirst)
+            {
+                _logger.LogWarning("Folder overlap detected: {CurrentFolder} ends at {CurrentLast}, {NextFolder} starts at {NextFirst}. This may cause out-of-order frames when client flattens.",
+                    currentFolder.CacheFolderName, currentLast, nextFolder.CacheFolderName, nextFirst);
+            }
+        }
+        
+        var totalFrames = result.Sum(cf => cf.Frames.Count);
+        
+        return new RadarTimeSeriesResponse
+        {
+            CacheFolders = result,
+            StartTime = startTime,
+            EndTime = endTime,
+            TotalFrames = totalFrames
+        };
+    }
+
+    public async Task<RadarFrame?> GetFrameFromCacheFolderAsync(
+        string suburb, 
+        string state, 
+        string cacheFolderName,
+        int frameIndex, 
+        CancellationToken cancellationToken = default)
+    {
+        var cachedFrames = await _cacheService.GetFramesFromCacheFolderAsync(
+            suburb, 
+            state, 
+            cacheFolderName, 
+            CachedDataType.Radar, 
+            cancellationToken);
+        
+        var radarFrame = cachedFrames.Cast<RadarFrame>().FirstOrDefault(f => f.FrameIndex == frameIndex);
+        
+        if (radarFrame != null)
+        {
+            // Generate URL
+            radarFrame.ImageUrl = $"/api/radar/{Uri.EscapeDataString(suburb)}/{Uri.EscapeDataString(state)}/frame/{frameIndex}?cacheFolder={Uri.EscapeDataString(cacheFolderName)}";
+        }
+        
+        return radarFrame;
+    }
+
 
     public void Dispose()
     {

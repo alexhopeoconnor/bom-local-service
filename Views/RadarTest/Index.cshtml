@@ -22,8 +22,14 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            padding: 20px;
+            padding: 10px;
             color: #333;
+        }
+        
+        @@media (min-width: 768px) {
+            body {
+                padding: 20px;
+            }
         }
         
         .container {
@@ -38,38 +44,131 @@
         .header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            padding: 30px;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        
+        @@media (min-width: 768px) {
+            .header {
+                padding: 30px;
+                gap: 20px;
+            }
+        }
+        
+        .header-content {
+            flex: 1;
             text-align: center;
+            min-width: 0;
         }
         
         .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
+            font-size: 1.5em;
+            margin-bottom: 8px;
             font-weight: 700;
+            word-wrap: break-word;
+        }
+        
+        @@media (min-width: 768px) {
+            .header h1 {
+                font-size: 2.5em;
+                margin-bottom: 10px;
+            }
         }
         
         .header .subtitle {
-            font-size: 1.1em;
+            font-size: 0.9em;
             opacity: 0.9;
         }
         
-        .content {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-            padding: 30px;
+        @@media (min-width: 768px) {
+            .header .subtitle {
+                font-size: 1.1em;
+            }
         }
         
-        @@media (max-width: 968px) {
+        .header-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .settings-header-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 10px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.9em;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 44px; /* Touch target size */
+        }
+        
+        @@media (min-width: 768px) {
+            .settings-header-btn {
+                padding: 12px 24px;
+                font-size: 1em;
+                gap: 8px;
+            }
+        }
+        
+        .settings-header-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: translateY(-2px);
+        }
+        
+        .content {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            padding: 15px;
+        }
+        
+        @@media (min-width: 768px) {
             .content {
-                grid-template-columns: 1fr;
+                gap: 20px;
+                padding: 30px;
+            }
+        }
+        
+        .info-section {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+        }
+        
+        @@media (min-width: 480px) {
+            .info-section {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @@media (min-width: 768px) {
+            .info-section {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 15px;
             }
         }
         
         .radar-section {
             background: #f8f9fa;
             border-radius: 12px;
-            padding: 20px;
+            padding: 15px;
+        }
+        
+        @@media (min-width: 768px) {
+            .radar-section {
+                padding: 20px;
+            }
         }
         
         .radar-image-container {
@@ -78,9 +177,16 @@
             background: #000;
             border-radius: 8px;
             overflow: hidden;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             aspect-ratio: 16/9;
-            min-height: 400px; /* Prevent layout shift */
+            min-height: 250px; /* Smaller on mobile */
+        }
+        
+        @@media (min-width: 768px) {
+            .radar-image-container {
+                margin-bottom: 20px;
+                min-height: 400px;
+            }
         }
         
         .radar-image {
@@ -105,11 +211,18 @@
         
         .frame-controls {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: center;
             justify-content: center;
             flex-wrap: wrap;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-controls {
+                gap: 10px;
+                margin-bottom: 20px;
+            }
         }
         
         .frame-btn {
@@ -143,21 +256,47 @@
         
         .play-controls {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             justify-content: center;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        
+        @@media (min-width: 768px) {
+            .play-controls {
+                gap: 10px;
+                margin-bottom: 20px;
+            }
         }
         
         .play-btn {
-            padding: 12px 30px;
+            padding: 12px 20px;
             border: none;
             background: #667eea;
             color: white;
             border-radius: 8px;
             cursor: pointer;
             font-weight: 600;
-            font-size: 1em;
+            font-size: 0.9em;
             transition: all 0.2s;
+            min-height: 44px; /* Touch target size */
+            flex: 1;
+            min-width: 100px;
+            white-space: nowrap;
+        }
+        
+        @@media (min-width: 480px) {
+            .play-btn {
+                flex: 0 1 auto;
+                min-width: auto;
+            }
+        }
+        
+        @@media (min-width: 768px) {
+            .play-btn {
+                padding: 12px 30px;
+                font-size: 1em;
+            }
         }
         
         .play-btn:hover {
@@ -174,29 +313,54 @@
         .info-section {
             background: #f8f9fa;
             border-radius: 12px;
-            padding: 20px;
+            padding: 15px;
+        }
+        
+        @@media (min-width: 768px) {
+            .info-section {
+                padding: 20px;
+            }
         }
         
         .info-card {
             background: white;
             border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 15px;
+            padding: 12px;
             border-left: 4px solid #667eea;
         }
         
+        @@media (min-width: 768px) {
+            .info-card {
+                padding: 15px;
+            }
+        }
+        
         .info-card h3 {
-            font-size: 0.9em;
+            font-size: 0.8em;
             text-transform: uppercase;
             color: #666;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             letter-spacing: 0.5px;
         }
         
+        @@media (min-width: 768px) {
+            .info-card h3 {
+                font-size: 0.9em;
+                margin-bottom: 8px;
+            }
+        }
+        
         .info-card .value {
-            font-size: 1.2em;
+            font-size: 1em;
             font-weight: 600;
             color: #333;
+            word-wrap: break-word;
+        }
+        
+        @@media (min-width: 768px) {
+            .info-card .value {
+                font-size: 1.2em;
+            }
         }
         
         .status-badge {
@@ -271,39 +435,308 @@
             font-size: 0.9em;
             margin-top: 10px;
         }
+        
+        /* Frame Slider Controls */
+        .frame-slider-container {
+            width: 100%;
+            max-width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
+            border-radius: 12px;
+            border: 2px solid #e0e0e0;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+            box-sizing: border-box;
+            margin-bottom: 15px;
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-slider-container {
+                padding: 24px;
+                border-radius: 16px;
+                margin-bottom: 20px;
+            }
+        }
+        
+        .frame-slider-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 12px;
+            width: 100%;
+            flex-wrap: wrap;
+        }
+        
+        @@media (min-width: 480px) {
+            .frame-slider-wrapper {
+                gap: 6px;
+                flex-wrap: nowrap;
+            }
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-slider-wrapper {
+                gap: 12px;
+                margin-bottom: 20px;
+            }
+        }
+        
+        .frame-nav-btn {
+            padding: 10px 16px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 0.9em;
+            transition: all 0.2s;
+            min-width: 50px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .frame-nav-btn:hover:not(:disabled) {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .frame-nav-btn:active:not(:disabled) {
+            transform: translateY(0);
+        }
+        
+        .frame-nav-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            background: #f0f0f0;
+            border-color: #d0d0d0;
+            color: #999;
+        }
+        
+        .frame-slider {
+            flex: 1;
+            min-width: 120px;
+            height: 10px;
+            border-radius: 5px;
+            background: #e0e0e0;
+            outline: none;
+            -webkit-appearance: none;
+            max-width: 100%;
+            cursor: pointer;
+            transition: background 0.2s;
+            width: 100%;
+            order: 3; /* Put slider in middle on mobile when wrapped */
+        }
+        
+        @@media (min-width: 480px) {
+            .frame-slider {
+                min-width: 100px;
+                order: 0; /* Reset order for larger screens */
+            }
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-slider {
+                min-width: 0;
+            }
+        }
+        
+        .frame-slider:hover {
+            background: #d0d0d0;
+        }
+        
+        /* Webkit (Chrome, Safari, Edge) */
+        .frame-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+            transition: all 0.2s;
+            border: 3px solid white;
+        }
+        
+        .frame-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.15);
+            box-shadow: 0 4px 16px rgba(102, 126, 234, 0.6);
+        }
+        
+        .frame-slider::-webkit-slider-thumb:active {
+            transform: scale(1.05);
+        }
+        
+        /* Track fill for webkit */
+        .frame-slider::-webkit-slider-runnable-track {
+            height: 10px;
+            border-radius: 5px;
+            background: linear-gradient(to right, #667eea 0%, #764ba2 100%);
+        }
+        
+        /* Firefox */
+        .frame-slider::-moz-range-thumb {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            cursor: pointer;
+            border: 3px solid white;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+            transition: all 0.2s;
+        }
+        
+        .frame-slider::-moz-range-thumb:hover {
+            transform: scale(1.15);
+            box-shadow: 0 4px 16px rgba(102, 126, 234, 0.6);
+        }
+        
+        .frame-slider::-moz-range-thumb:active {
+            transform: scale(1.05);
+        }
+        
+        .frame-slider::-moz-range-track {
+            height: 10px;
+            border-radius: 5px;
+            background: #e0e0e0;
+        }
+        
+        .frame-slider::-moz-range-progress {
+            height: 10px;
+            border-radius: 5px;
+            background: linear-gradient(to right, #667eea 0%, #764ba2 100%);
+        }
+        
+        .frame-info-display {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+            padding-top: 12px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        @@media (min-width: 480px) {
+            .frame-info-display {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 16px;
+                padding-top: 16px;
+            }
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-info-display {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            }
+        }
+        
+        .frame-info-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.85em;
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-info-item {
+                gap: 8px;
+                font-size: 0.95em;
+            }
+        }
+        
+        .frame-info-label {
+            color: #667eea;
+            font-weight: 600;
+            font-size: 0.8em;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            min-width: 60px;
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-info-label {
+                font-size: 0.9em;
+                min-width: 70px;
+            }
+        }
+        
+        .frame-info-value {
+            color: #333;
+            font-weight: 700;
+            font-size: 0.95em;
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-info-value {
+                font-size: 1.1em;
+            }
+        }
+        
+        .frame-jump-input {
+            width: 70px;
+            padding: 10px 12px;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            font-size: 0.9em;
+            text-align: center;
+            font-weight: 700;
+            color: #333;
+            background: white;
+            transition: all 0.2s;
+            min-height: 44px; /* Touch target size */
+            box-sizing: border-box;
+        }
+        
+        @@media (min-width: 768px) {
+            .frame-jump-input {
+                padding: 8px 12px;
+                font-size: 1em;
+                min-height: auto;
+            }
+        }
+        }
+        
+        .frame-jump-input:focus {
+            outline: none;
+            border-color: #764ba2;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.15);
+            background: #f8f9ff;
+        }
+        
+        .frame-jump-input::-webkit-inner-spin-button,
+        .frame-jump-input::-webkit-outer-spin-button {
+            opacity: 1;
+            height: 20px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌧️ BOM Radar Test</h1>
-            <div class="subtitle">@suburb, @state</div>
+            <div class="header-content">
+                <h1>🌧️ BOM Radar Test</h1>
+                <div class="subtitle">@suburb, @state</div>
+            </div>
+            <div class="header-actions">
+                <button class="settings-header-btn" id="settings-btn-header">
+                    <span>⚙️</span>
+                    <span>Settings</span>
+                </button>
+            </div>
         </div>
         
         <div id="error-container"></div>
         
         <div class="content">
-            <div class="radar-section">
-                <div class="radar-image-container">
-                    <div class="loading" id="loading">Loading radar data...</div>
-                    <img id="radar-image" class="radar-image" style="display: none;" alt="Radar image">
-                </div>
-                
-                <div class="frame-controls" id="frame-controls"></div>
-                
-                <div class="play-controls">
-                    <button class="play-btn" id="play-btn">▶ Play</button>
-                    <button class="play-btn" id="prev-btn">◀ Previous</button>
-                    <button class="play-btn" id="next-btn">Next ▶</button>
-                </div>
-                
-                <div class="frame-info" id="frame-info"></div>
-            </div>
-            
+            <!-- Status Cards Section - Above slideshow -->
             <div class="info-section">
                 <div class="info-card">
-                    <h3>Cache Status</h3>
+                    <h3>Cache & Update Status</h3>
                     <div class="value" id="cache-status">Checking...</div>
+                    <div class="timestamp" id="update-status-detail"></div>
                 </div>
                 
                 <div class="info-card">
@@ -334,12 +767,6 @@
                 </div>
                 
                 <div class="info-card">
-                    <h3>Update Status</h3>
-                    <div class="value" id="update-status">-</div>
-                    <div class="timestamp" id="update-status-detail"></div>
-                </div>
-                
-                <div class="info-card">
                     <h3>Auto Refresh</h3>
                     <div class="value">
                         <span class="refresh-indicator" id="refresh-indicator"></span>
@@ -348,42 +775,112 @@
                     <div class="timestamp" id="last-refresh"></div>
                     <div class="timestamp" id="next-client-check"></div>
                 </div>
-                
-                <div class="info-card">
-                    <h3>Settings</h3>
-                    <button class="play-btn" id="settings-btn" style="width: 100%; margin-top: 10px;">⚙️ Settings</button>
+            </div>
+            
+            <!-- Radar Slideshow Section -->
+            <div class="radar-section">
+                <div class="radar-image-container">
+                    <div class="loading" id="loading">Loading radar data...</div>
+                    <img id="radar-image" class="radar-image" style="display: none;" alt="Radar image">
                 </div>
+                
+                <div class="frame-controls" id="frame-controls"></div>
+                
+                <div class="play-controls">
+                    <button class="play-btn" id="play-btn">▶ Play</button>
+                    <button class="play-btn" id="prev-btn">◀ Previous</button>
+                    <button class="play-btn" id="next-btn">Next ▶</button>
+                </div>
+                
+                <div class="frame-info" id="frame-info"></div>
             </div>
         </div>
     </div>
     
     <!-- Settings Modal -->
-    <div id="settings-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
-        <div style="background: white; border-radius: 12px; padding: 30px; max-width: 500px; width: 90%; max-height: 90vh; overflow-y: auto;">
-            <h2 style="margin-bottom: 20px; color: #667eea;">Settings</h2>
+    <div id="settings-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 1000; align-items: center; justify-content: center; animation: fadeIn 0.2s;">
+        <div style="background: white; border-radius: 16px; padding: 20px; max-width: 650px; width: 95%; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3); position: relative;">
+            <button id="close-settings-btn" style="position: absolute; top: 15px; right: 15px; background: #f0f0f0; border: none; font-size: 24px; color: #666; cursor: pointer; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 50%; transition: all 0.2s; font-weight: 300;" 
+                    onmouseover="this.style.background='#e0e0e0'; this.style.color='#333';" 
+                    onmouseout="this.style.background='#f0f0f0'; this.style.color='#666';"
+                    onclick="hideSettings()">×</button>
+            <h2 style="margin-bottom: 20px; color: #667eea; font-size: 1.5em; display: flex; align-items: center; gap: 12px; font-weight: 700;">
+                <span style="font-size: 1.2em;">⚙️</span> Settings
+            </h2>
             
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Frame Interval (seconds)</label>
-                <input type="number" id="frame-interval-input" min="0.5" max="10" step="0.5" style="width: 100%; padding: 10px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
-                <div class="timestamp" style="margin-top: 5px;">Time between frames in slideshow</div>
+            <div style="background: #f8f9ff; border-left: 4px solid #667eea; padding: 15px; border-radius: 8px; margin-bottom: 30px;">
+                <div style="font-weight: 600; color: #667eea; margin-bottom: 5px;">💡 Tip</div>
+                <div style="font-size: 0.9em; color: #666;">Configure your slideshow experience and select extended timespans to view historical radar data.</div>
             </div>
             
-            <div style="margin-bottom: 20px;">
-                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Auto Refresh Interval (seconds)</label>
-                <input type="number" id="refresh-interval-input" min="10" max="300" step="10" style="width: 100%; padding: 10px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
-                <div class="timestamp" style="margin-top: 5px;">How often to check for new radar data</div>
+            <div style="margin-bottom: 25px;">
+                <div style="font-size: 0.85em; text-transform: uppercase; color: #667eea; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 15px;">Slideshow Configuration</div>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Slideshow Timespan</label>
+                    <select id="timespan-select" style="width: 100%; padding: 12px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em; background: white;">
+                        <option value="latest">Latest 7 frames (default)</option>
+                        <option value="1h">Last 1 hour</option>
+                        <option value="3h">Last 3 hours</option>
+                        <option value="6h">Last 6 hours</option>
+                        <option value="12h">Last 12 hours</option>
+                        <option value="24h">Last 24 hours</option>
+                        <option value="custom">Custom range...</option>
+                    </select>
+                    <div class="timestamp" style="margin-top: 6px;">Select how much historical data to include in slideshow</div>
+                </div>
+                
+                <div id="cache-range-info" style="margin-bottom: 20px; padding: 12px; background: #f8f9fa; border-radius: 8px; font-size: 0.9em; border: 1px solid #e0e0e0;">
+                    <div style="font-weight: 600; color: #333; margin-bottom: 5px;">📊 Available Cache Range:</div>
+                    <div id="cache-range-text">Loading...</div>
+                </div>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Frame Interval (seconds)</label>
+                    <input type="number" id="frame-interval-input" min="0.5" max="10" step="0.5" style="width: 100%; padding: 12px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
+                    <div class="timestamp" style="margin-top: 6px;">Time between frames in slideshow</div>
+                </div>
             </div>
             
-            <div style="margin-bottom: 20px;">
-                <label style="display: flex; align-items: center; cursor: pointer;">
-                    <input type="checkbox" id="auto-play-input" style="width: 20px; height: 20px; margin-right: 10px; cursor: pointer;">
-                    <span style="font-weight: 600; color: #333;">Auto-play on page load</span>
-                </label>
+            <div style="margin-bottom: 25px; padding-top: 20px; border-top: 2px solid #f0f0f0;">
+                <div style="font-size: 0.85em; text-transform: uppercase; color: #667eea; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 15px;">Auto Refresh</div>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Auto Refresh Interval (seconds)</label>
+                    <input type="number" id="refresh-interval-input" min="10" max="300" step="10" style="width: 100%; padding: 12px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
+                    <div class="timestamp" style="margin-top: 6px;">How often to check for new radar data</div>
+                </div>
             </div>
             
-            <div style="display: flex; gap: 10px; margin-top: 30px;">
-                <button class="play-btn" id="save-settings-btn" style="flex: 1;">Save</button>
-                <button class="play-btn" id="cancel-settings-btn" style="flex: 1; background: #6c757d;">Cancel</button>
+            <div id="custom-range-section" style="display: none; margin-bottom: 20px; padding: 15px; background: #f8f9ff; border-radius: 8px; border: 1px solid #e0e0ff;">
+                <div style="font-weight: 600; color: #667eea; margin-bottom: 12px;">📅 Custom Time Range</div>
+                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Start Time</label>
+                <input type="datetime-local" id="start-time-input" style="width: 100%; padding: 12px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em; margin-bottom: 12px;">
+                
+                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">End Time</label>
+                <input type="datetime-local" id="end-time-input" style="width: 100%; padding: 12px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
+                
+                <div class="timestamp" style="margin-top: 6px;">Select custom time range (times are in local timezone)</div>
+            </div>
+            
+            <div style="margin-bottom: 25px; padding-top: 20px; border-top: 2px solid #f0f0f0;">
+                <div style="font-size: 0.85em; text-transform: uppercase; color: #667eea; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 15px;">Playback Options</div>
+                
+                <div style="margin-bottom: 20px;">
+                    <label style="display: flex; align-items: center; cursor: pointer; padding: 12px; background: #f8f9fa; border-radius: 8px; transition: background 0.2s;" 
+                           onmouseover="this.style.background='#f0f0f0';" 
+                           onmouseout="this.style.background='#f8f9fa';">
+                        <input type="checkbox" id="auto-play-input" style="width: 20px; height: 20px; margin-right: 12px; cursor: pointer;">
+                        <span style="font-weight: 600; color: #333;">Auto-play on page load</span>
+                    </label>
+                </div>
+            </div>
+            
+            <div style="display: flex; gap: 12px; margin-top: 30px; padding-top: 20px; border-top: 2px solid #f0f0f0;">
+                <button class="play-btn" id="save-settings-btn" style="flex: 1; padding: 14px; font-size: 1.05em; font-weight: 600;">💾 Save Settings</button>
+                <button class="play-btn" id="cancel-settings-btn" style="flex: 1; background: #6c757d; padding: 14px; font-size: 1.05em; font-weight: 600;" 
+                        onmouseover="this.style.background='#5a6268';" 
+                        onmouseout="this.style.background='#6c757d';">Cancel</button>
             </div>
         </div>
     </div>
@@ -408,8 +905,14 @@
         let settings = {
             frameInterval: 2.0,      // seconds between frames
             refreshInterval: 30,     // seconds between API refreshes
-            autoPlay: true           // auto-play on load
+            autoPlay: true,          // auto-play on load
+            timespan: 'latest'       // 'latest', '1h', '3h', '6h', '12h', '24h', 'custom'
         };
+        
+        // State for extended timespan mode
+        let cacheRangeInfo = null;
+        let historicalData = null;
+        let isExtendedMode = false;
         
         // Cookie management
         function setCookie(name, value, days = 365) {
@@ -453,6 +956,18 @@
             document.getElementById('frame-interval-input').value = settings.frameInterval;
             document.getElementById('refresh-interval-input').value = settings.refreshInterval;
             document.getElementById('auto-play-input').checked = settings.autoPlay;
+            document.getElementById('timespan-select').value = settings.timespan || 'latest';
+            
+            // Show/hide custom range section
+            const customSection = document.getElementById('custom-range-section');
+            if (settings.timespan === 'custom') {
+                customSection.style.display = 'block';
+            } else {
+                customSection.style.display = 'none';
+            }
+            
+            // Load cache range info when settings modal opens
+            fetchCacheRange();
         }
         
         function applySettings() {
@@ -532,34 +1047,397 @@
             }
         }
         
-        // Fetch radar data
-        async function fetchRadarData() {
+        // Fetch cache range information
+        async function fetchCacheRange() {
             try {
-                const response = await fetch(API_BASE, {
-                    signal: AbortSignal.timeout(10000) // 10 second timeout
+                const response = await fetch(`${API_BASE.replace('/api/radar', '/api/cache')}/range`, {
+                    signal: AbortSignal.timeout(10000)
                 });
                 
                 if (!response.ok) {
-                    const error = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
-                    throw new Error(error.error || 'Failed to fetch radar data');
+                    // Check if it's a network error
+                    const isNetworkError = response.status === 0 || response.status >= 500;
+                    if (isNetworkError) {
+                        throw new Error('Network error');
+                    }
+                    console.warn('Failed to fetch cache range');
+                    return { data: null, error: null };
                 }
                 
                 const data = await response.json();
-                lastRefreshTime = new Date();
+                cacheRangeInfo = data;
                 
-                // API is working - reset retry state
-                if (isApiDown) {
-                    isApiDown = false;
-                    retryAttempts = 0;
-                    clearError();
-                    if (retryInterval) {
-                        clearInterval(retryInterval);
-                        retryInterval = null;
+                // Update UI
+                const rangeTextEl = document.getElementById('cache-range-text');
+                if (rangeTextEl) {
+                    if (data.totalCacheFolders > 0) {
+                        const oldest = new Date(data.oldestCache.cacheTimestamp);
+                        const newest = new Date(data.newestCache.cacheTimestamp);
+                        const spanHours = data.timeSpanMinutes ? Math.round(data.timeSpanMinutes / 60 * 10) / 10 : 0;
+                        
+                        rangeTextEl.innerHTML = `
+                            <div>Oldest: ${formatDate(data.oldestCache.cacheTimestamp)}</div>
+                            <div>Newest: ${formatDate(data.newestCache.cacheTimestamp)}</div>
+                            <div>Total: ${data.totalCacheFolders} cache folders (${spanHours} hours)</div>
+                        `;
+                    } else {
+                        rangeTextEl.textContent = 'No cache data available';
                     }
-                    updateApiStatus('connected');
                 }
                 
-                return data;
+                return { data: data, error: null };
+            } catch (error) {
+                console.error('Error fetching cache range:', error);
+                const rangeTextEl = document.getElementById('cache-range-text');
+                if (rangeTextEl) {
+                    rangeTextEl.textContent = 'Unable to load cache range';
+                }
+                
+                // Check if it's a network error (API down)
+                const isNetworkError = error.name === 'TypeError' || 
+                                      error.name === 'AbortError' || 
+                                      error.message.includes('fetch') ||
+                                      error.message.includes('network') ||
+                                      error.message === 'Network error';
+                
+                if (isNetworkError) {
+                    return { data: null, error: 'network' };
+                }
+                return { data: null, error: null };
+            }
+        }
+        
+        // Fetch historical radar data for extended timespan
+        async function fetchHistoricalRadar(startTime, endTime) {
+            try {
+                let url = `${API_BASE}/timeseries`;
+                const params = new URLSearchParams();
+                if (startTime) params.append('startTime', startTime.toISOString());
+                if (endTime) params.append('endTime', endTime.toISOString());
+                if (params.toString()) url += '?' + params.toString();
+                
+                const response = await fetch(url, {
+                    signal: AbortSignal.timeout(30000) // Longer timeout for potentially large responses
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                    throw new Error(error.error || 'Failed to fetch historical radar');
+                }
+                
+                const data = await response.json();
+                historicalData = data;
+                
+                // Flatten all frames from all cache folders (should already be in chronological order from backend)
+                const allFrames = [];
+                data.cacheFolders.forEach(cacheFolder => {
+                    cacheFolder.frames.forEach(frame => {
+                        // Add metadata about which cache folder this frame belongs to
+                        frame.cacheTimestamp = cacheFolder.cacheTimestamp;
+                        frame.observationTime = cacheFolder.observationTime;
+                        frame.cacheFolderName = cacheFolder.cacheFolderName;
+                        
+                        // absoluteObservationTime is already calculated by the backend
+                        
+                        allFrames.push(frame);
+                    });
+                });
+                
+                // Validate chronological order to detect backend issues
+                let previousTime = null;
+                const outOfOrderFrames = [];
+                allFrames.forEach((frame, idx) => {
+                    if (frame.absoluteObservationTime) {
+                        const currentTime = new Date(frame.absoluteObservationTime).getTime();
+                        if (previousTime !== null && currentTime < previousTime) {
+                            outOfOrderFrames.push({
+                                index: idx,
+                                frameIndex: frame.frameIndex,
+                                cacheFolder: frame.cacheFolderName,
+                                absoluteTime: frame.absoluteObservationTime,
+                                previousTime: new Date(previousTime).toISOString(),
+                                timeDiffMinutes: (currentTime - previousTime) / 1000 / 60
+                            });
+                        }
+                        previousTime = currentTime;
+                    } else {
+                        // Missing absoluteObservationTime is also an issue
+                        console.warn(`Frame at index ${idx} missing absoluteObservationTime`, {
+                            frameIndex: frame.frameIndex,
+                            cacheFolder: frame.cacheFolderName,
+                            minutesAgo: frame.minutesAgo,
+                            observationTime: frame.observationTime
+                        });
+                    }
+                });
+                
+                if (outOfOrderFrames.length > 0) {
+                    console.error('Backend returned frames out of chronological order:', {
+                        count: outOfOrderFrames.length,
+                        issues: outOfOrderFrames
+                    });
+                }
+                
+                // Re-index frames sequentially for display
+                allFrames.forEach((frame, idx) => {
+                    frame.sequentialIndex = idx;
+                });
+                
+                return { frames: allFrames, error: null };
+            } catch (error) {
+                console.error('Error fetching historical radar:', error);
+                // Check if it's a network error (API down)
+                const isNetworkError = error.name === 'TypeError' || 
+                                      error.name === 'AbortError' || 
+                                      error.message.includes('fetch') ||
+                                      error.message.includes('network');
+                
+                if (isNetworkError) {
+                    // Return error indicator so caller can handle it properly
+                    return { frames: null, error: 'network' };
+                }
+                
+                // For other errors, return empty frames (might be a valid "no data" case)
+                return { frames: [], error: null };
+            }
+        }
+        
+        // Fetch radar data
+        async function fetchRadarData() {
+            try {
+                // Check if we're in extended mode
+                if (settings.timespan !== 'latest') {
+                    // Fetch cache range first (if not already loaded)
+                    if (!cacheRangeInfo) {
+                        const rangeResult = await fetchCacheRange();
+                        if (rangeResult.error === 'network') {
+                            // API is down - let the error handling below deal with it
+                            throw new Error('Network error - API unavailable');
+                        }
+                        cacheRangeInfo = rangeResult.data;
+                    }
+                    
+                    if (!cacheRangeInfo || cacheRangeInfo.totalCacheFolders === 0) {
+                        // No cache available - trigger a refresh and show graceful message
+                        const refreshEndpoint = `${API_BASE.replace('/api/radar', '/api/cache')}/refresh`;
+                        fetch(refreshEndpoint, {
+                            method: 'POST',
+                            signal: AbortSignal.timeout(5000)
+                        }).catch(err => {
+                            console.debug('Background cache refresh trigger failed (non-critical):', err);
+                        });
+                        
+                        // Fetch cache status to update UI
+                        try {
+                            const statusResponse = await fetch(`${API_BASE}`, {
+                                signal: AbortSignal.timeout(5000)
+                            });
+                            if (statusResponse.status === 404) {
+                                const errorData = await statusResponse.json().catch(() => ({}));
+                                // Determine if update is in progress
+                                const isUpdating = errorData.updateTriggered === true || 
+                                                 (errorData.message && errorData.message.includes('in progress'));
+                                
+                                // Create a data-like object with cache status for updateUI
+                                const cacheStatusData = {
+                                    frames: [],
+                                    isUpdating: isUpdating,
+                                    cacheIsValid: errorData.cacheIsValid || false,
+                                    cacheExpiresAt: errorData.cacheExpiresAt || null,
+                                    nextUpdateTime: errorData.nextUpdateTime || null
+                                };
+                                updateUI(cacheStatusData);
+                            }
+                        } catch (err) {
+                            console.debug('Could not fetch cache status:', err);
+                        }
+                        
+                        showNoFramesMessage('No historical cache data available yet. Cache update has been triggered in the background.');
+                        return null;
+                    }
+                    
+                    // Calculate time range based on settings
+                    let startTime = null;
+                    let endTime = new Date(); // Now
+                    
+                    if (settings.timespan === 'custom') {
+                        const startInput = document.getElementById('start-time-input');
+                        const endInput = document.getElementById('end-time-input');
+                        if (startInput && startInput.value) {
+                            startTime = new Date(startInput.value);
+                        }
+                        if (endInput && endInput.value) {
+                            endTime = new Date(endInput.value);
+                        }
+                    } else {
+                        // Calculate hours back from now
+                        const hours = parseInt(settings.timespan.replace('h', '')) || 1;
+                        startTime = new Date(endTime.getTime() - (hours * 60 * 60 * 1000));
+                    }
+                    
+                    // Fetch historical data
+                    const result = await fetchHistoricalRadar(startTime, endTime);
+                    if (result.error === 'network') {
+                        // API is down - let the error handling below deal with it
+                        throw new Error('Network error - API unavailable');
+                    }
+                    
+                    const allFrames = result.frames;
+                    if (!allFrames || allFrames.length === 0) {
+                        showNoFramesMessage('No frames found for selected timespan. Try a different range or wait for more cache data.');
+                        return null;
+                    }
+                    
+                    // Fetch latest radar data to get metadata (weatherStation, distance, etc.)
+                    // We only need the metadata, not the frames
+                    let metadata = null;
+                    try {
+                        const metadataResponse = await fetch(API_BASE, {
+                            signal: AbortSignal.timeout(5000)
+                        });
+                        if (metadataResponse.ok) {
+                            const latestData = await metadataResponse.json();
+                            metadata = {
+                                weatherStation: latestData.weatherStation,
+                                distance: latestData.distance,
+                                observationTime: latestData.observationTime,
+                                cacheExpiresAt: latestData.cacheExpiresAt,
+                                nextUpdateTime: latestData.nextUpdateTime,
+                                cacheIsValid: latestData.cacheIsValid,
+                                isUpdating: latestData.isUpdating
+                            };
+                        }
+                    } catch (err) {
+                        // If we can't fetch metadata, use defaults from historical data
+                        console.debug('Could not fetch metadata for extended mode:', err);
+                    }
+                    
+                    // Create a RadarResponse-like object for compatibility
+                    const newestCacheFolder = historicalData.cacheFolders[historicalData.cacheFolders.length - 1];
+                    const data = {
+                        frames: allFrames,
+                        lastUpdated: endTime.toISOString(),
+                        observationTime: metadata?.observationTime || newestCacheFolder?.observationTime || endTime.toISOString(),
+                        forecastTime: endTime.toISOString(),
+                        weatherStation: metadata?.weatherStation || null,
+                        distance: metadata?.distance || null,
+                        cacheIsValid: metadata?.cacheIsValid ?? true,
+                        cacheExpiresAt: metadata?.cacheExpiresAt || endTime.toISOString(),
+                        isUpdating: metadata?.isUpdating || false,
+                        nextUpdateTime: metadata?.nextUpdateTime || endTime.toISOString(),
+                        totalFrames: allFrames.length,
+                        isExtendedMode: true
+                    };
+                    
+                    lastRefreshTime = new Date();
+                    
+                    // API is working - reset retry state
+                    if (isApiDown) {
+                        isApiDown = false;
+                        retryAttempts = 0;
+                        clearError();
+                        if (retryInterval) {
+                            clearInterval(retryInterval);
+                            retryInterval = null;
+                        }
+                        updateApiStatus('connected');
+                    }
+                    
+                    return data;
+                } else {
+                    // Original logic for latest 7 frames
+                    const response = await fetch(API_BASE, {
+                        signal: AbortSignal.timeout(10000) // 10 second timeout
+                    });
+                    
+                    if (!response.ok) {
+                        const error = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+                        
+                        // Handle 404 more gracefully - cache is being generated
+                        if (response.status === 404) {
+                            const errorData = await response.json().catch(() => ({}));
+                            lastRefreshTime = new Date(); // Track that we checked
+                            
+                            // API is working - reset retry state
+                            if (isApiDown) {
+                                isApiDown = false;
+                                retryAttempts = 0;
+                                clearError();
+                                if (retryInterval) {
+                                    clearInterval(retryInterval);
+                                    retryInterval = null;
+                                }
+                                updateApiStatus('connected');
+                            }
+                            
+                            // Explicitly trigger cache refresh if refreshEndpoint is provided
+                            if (errorData.refreshEndpoint) {
+                                // Trigger cache update in background (fire and forget)
+                                fetch(errorData.refreshEndpoint, {
+                                    method: 'POST',
+                                    signal: AbortSignal.timeout(5000)
+                                }).catch(err => {
+                                    console.debug('Background cache refresh trigger failed (non-critical):', err);
+                                });
+                            }
+                            
+                            // Use actual cache status from API if available
+                            // Determine if update is in progress: UpdateTriggered=true OR Message indicates update in progress
+                            if (errorData.updateTriggered !== undefined || errorData.cacheIsValid !== undefined || errorData.cacheExists !== undefined) {
+                                // Determine if update is in progress
+                                const isUpdating = errorData.updateTriggered === true || 
+                                                 (errorData.message && errorData.message.includes('in progress'));
+                                
+                                // Create a data-like object with cache status for updateUI
+                                const cacheStatusData = {
+                                    frames: [],
+                                    isUpdating: isUpdating,
+                                    cacheIsValid: errorData.cacheIsValid || false,
+                                    cacheExpiresAt: errorData.cacheExpiresAt || null,
+                                    nextUpdateTime: errorData.nextUpdateTime || null
+                                };
+                                console.debug('Updating UI with cache status from 404:', cacheStatusData);
+                                updateUI(cacheStatusData);
+                            } else if (errorData.retryAfter) {
+                                // Fallback to old method if cache status not available
+                                console.debug('Cache status not in 404 response, using fallback method');
+                                updateStatusForCacheUpdate(errorData.retryAfter, errorData.refreshEndpoint);
+                            } else {
+                                // No cache status info at all - set default updating status
+                                console.debug('No cache status info available, setting default updating status');
+                                const defaultStatusData = {
+                                    frames: [],
+                                    isUpdating: true,
+                                    cacheIsValid: false
+                                };
+                                updateUI(defaultStatusData);
+                            }
+                            
+                            showNoFramesMessage(`Cache is being generated. Please wait ${errorData.retryAfter || 30} seconds and refresh.`, errorData.refreshEndpoint);
+                            return null;
+                        }
+                        
+                        throw new Error(error.error || 'Failed to fetch radar data');
+                    }
+                    
+                    const data = await response.json();
+                    lastRefreshTime = new Date();
+                    data.isExtendedMode = false;
+                    
+                    // API is working - reset retry state
+                    if (isApiDown) {
+                        isApiDown = false;
+                        retryAttempts = 0;
+                        clearError();
+                        if (retryInterval) {
+                            clearInterval(retryInterval);
+                            retryInterval = null;
+                        }
+                        updateApiStatus('connected');
+                    }
+                    
+                    return data;
+                }
             } catch (error) {
                 console.error('Error fetching radar data:', error);
                 
@@ -652,53 +1530,179 @@
             container.innerHTML = `<div class="${errorClass}">${isRetrying ? '⚠️ ' : '❌ Error: '}${message}</div>`;
         }
         
+        // Show graceful "no frames" message (cache being generated)
+        function showNoFramesMessage(message, refreshEndpoint = null) {
+            const container = document.getElementById('error-container');
+            let html = `<div class="error retrying" style="background: #fff3cd; color: #856404; border-left-color: #ffc107;">
+                <div style="margin-bottom: 10px;">⏳ ${message}</div>`;
+            
+            if (refreshEndpoint) {
+                html += `<button class="play-btn" onclick="window.location.reload()" style="margin-top: 10px; padding: 8px 16px; font-size: 0.9em;">
+                    🔄 Refresh Now
+                </button>`;
+            }
+            
+            html += `</div>`;
+            container.innerHTML = html;
+            
+            // Hide loading and show message in image container
+            document.getElementById('loading').textContent = message;
+            document.getElementById('radar-image').style.display = 'none';
+        }
+        
         // Clear error message
         function clearError() {
             document.getElementById('error-container').innerHTML = '';
         }
         
+        // Fetch metadata separately (when frames aren't available yet)
+        async function fetchMetadata() {
+            try {
+                const response = await fetch(`${API_BASE}/metadata`, {
+                    signal: AbortSignal.timeout(5000)
+                });
+                
+                if (response.ok) {
+                    const metadata = await response.json();
+                    return metadata;
+                }
+            } catch (error) {
+                console.debug('Could not fetch metadata:', error);
+            }
+            return null;
+        }
+        
+        // Update status cards with cache update information (when cache is being generated)
+        function updateStatusForCacheUpdate(retryAfter, refreshEndpoint) {
+            const statusEl = document.getElementById('cache-status');
+            statusEl.innerHTML = 'Generating <span class="status-badge status-updating">IN PROGRESS</span>';
+            
+            const updateStatusDetailEl = document.getElementById('update-status-detail');
+            
+            if (retryAfter) {
+                const estimatedTime = new Date(Date.now() + (retryAfter * 1000));
+                updateStatusDetailEl.textContent = `Cache generation in progress. Estimated ready in ${retryAfter} seconds.`;
+                document.getElementById('next-update').textContent = formatDate(estimatedTime.toISOString());
+            } else {
+                updateStatusDetailEl.textContent = 'Cache generation in progress, please wait...';
+                document.getElementById('next-update').textContent = '-';
+            }
+            
+            // Set other fields to indicate cache is being generated
+            document.getElementById('observation-time').textContent = '-';
+            document.getElementById('cache-expires').textContent = '-';
+            document.getElementById('weather-station').textContent = '-';
+            document.getElementById('distance').textContent = '-';
+            
+            // Update last refresh
+            if (lastRefreshTime) {
+                document.getElementById('last-refresh').textContent = 
+                    'Last checked: ' + formatDate(lastRefreshTime.toISOString());
+                
+                // Calculate and display next client check time
+                nextClientCheckTime = new Date(lastRefreshTime.getTime() + (settings.refreshInterval * 1000));
+                const nextCheckEl = document.getElementById('next-client-check');
+                if (nextCheckEl) {
+                    nextCheckEl.textContent = 'Next check: ' + formatDate(nextClientCheckTime.toISOString()) + ' (' + getRelativeTime(nextClientCheckTime.toISOString()) + ')';
+                }
+            }
+        }
+        
         // Update UI with radar data
         function updateUI(data) {
+            // Update cache status even if no frames are available (if we have metadata)
+            if (data) {
+                // Update cache status
+                const statusEl = document.getElementById('cache-status');
+                if (data.isUpdating !== undefined || data.cacheIsValid !== undefined) {
+                    let statusHtml = '';
+                    if (data.isUpdating) {
+                        statusHtml = 'Updating <span class="status-badge status-updating">IN PROGRESS</span>';
+                    } else if (data.cacheIsValid) {
+                        statusHtml = 'Valid <span class="status-badge status-valid">ACTIVE</span>';
+                    } else {
+                        statusHtml = 'Invalid <span class="status-badge status-invalid">EXPIRED</span>';
+                    }
+                    statusEl.innerHTML = statusHtml;
+                }
+                
+                // Update update status detail (now shown below cache status in combined card)
+                const updateStatusDetailEl = document.getElementById('update-status-detail');
+                if (data.isUpdating !== undefined || data.cacheIsValid !== undefined) {
+                    if (data.isUpdating) {
+                        if (data.nextUpdateTime) {
+                            updateStatusDetailEl.textContent = 'Estimated completion: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
+                        } else {
+                            updateStatusDetailEl.textContent = 'Update in progress, please wait...';
+                        }
+                    } else if (data.cacheIsValid) {
+                        updateStatusDetailEl.textContent = 'No update needed';
+                    } else {
+                        if (data.nextUpdateTime) {
+                            updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
+                        } else {
+                            updateStatusDetailEl.textContent = 'Update will be triggered by background service';
+                        }
+                    }
+                }
+                
+                // Update other metadata fields if available
+                if (data.observationTime) {
+                    document.getElementById('observation-time').textContent = formatDate(data.observationTime);
+                }
+                if (data.cacheExpiresAt) {
+                    document.getElementById('cache-expires').textContent = formatDate(data.cacheExpiresAt);
+                }
+                if (data.nextUpdateTime) {
+                    document.getElementById('next-update').textContent = formatDate(data.nextUpdateTime);
+                }
+                if (data.weatherStation !== undefined) {
+                    document.getElementById('weather-station').textContent = data.weatherStation || '-';
+                }
+                if (data.distance !== undefined) {
+                    document.getElementById('distance').textContent = data.distance || '-';
+                }
+            }
+            
             if (!data || !data.frames || data.frames.length === 0) {
-                showError('No radar frames available');
+                // No frames available - show message and disable controls
+                // Status should already be set by updateUI if cache status was provided
+                // Only set default status if it's still "Checking..."
+                const currentStatus = document.getElementById('cache-status').innerHTML;
+                if (currentStatus === 'Checking...' || currentStatus.trim() === '') {
+                    // Status hasn't been set yet, set it to indicate cache is being generated
+                    const statusEl = document.getElementById('cache-status');
+                    statusEl.innerHTML = 'Generating <span class="status-badge status-updating">IN PROGRESS</span>';
+                    
+                    const updateStatusDetailEl = document.getElementById('update-status-detail');
+                    updateStatusDetailEl.textContent = 'Cache generation in progress, please wait...';
+                }
+                
+                showNoFramesMessage('No radar frames available yet. Cache is being generated in the background. Please wait a moment and refresh.');
+                frames = [];
+                document.getElementById('frame-controls').innerHTML = '';
+                document.getElementById('play-btn').disabled = true;
+                document.getElementById('prev-btn').disabled = true;
+                document.getElementById('next-btn').disabled = true;
+                document.getElementById('frame-info').textContent = 'Waiting for cache to be generated...';
                 return;
             }
             
             radarData = data;
-            frames = data.frames.sort((a, b) => a.frameIndex - b.frameIndex);
+            isExtendedMode = data.isExtendedMode || false;
             
-            // Update cache status
-            const statusEl = document.getElementById('cache-status');
-            let statusHtml = '';
-            if (data.isUpdating) {
-                statusHtml = 'Updating <span class="status-badge status-updating">IN PROGRESS</span>';
-            } else if (data.cacheIsValid) {
-                statusHtml = 'Valid <span class="status-badge status-valid">ACTIVE</span>';
-            } else {
-                statusHtml = 'Invalid <span class="status-badge status-invalid">EXPIRED</span>';
-            }
-            statusEl.innerHTML = statusHtml;
+            // Enable controls since we have frames
+            document.getElementById('play-btn').disabled = false;
+            document.getElementById('prev-btn').disabled = false;
+            document.getElementById('next-btn').disabled = false;
             
-            // Update update status card
-            const updateStatusEl = document.getElementById('update-status');
-            const updateStatusDetailEl = document.getElementById('update-status-detail');
-            if (data.isUpdating) {
-                updateStatusEl.innerHTML = 'Cache Update <span class="status-badge status-updating">IN PROGRESS</span>';
-                if (data.nextUpdateTime) {
-                    updateStatusDetailEl.textContent = 'Estimated completion: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
-                } else {
-                    updateStatusDetailEl.textContent = 'Update in progress, please wait...';
-                }
-            } else if (data.cacheIsValid) {
-                updateStatusEl.innerHTML = 'Cache <span class="status-badge status-valid">UP TO DATE</span>';
-                updateStatusDetailEl.textContent = 'No update needed';
+            // Sort frames appropriately
+            if (isExtendedMode) {
+                // Already sorted by fetchHistoricalRadar
+                frames = data.frames;
             } else {
-                updateStatusEl.innerHTML = 'Cache <span class="status-badge status-invalid">STALE</span>';
-                if (data.nextUpdateTime) {
-                    updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
-                } else {
-                    updateStatusDetailEl.textContent = 'Update will be triggered by background service';
-                }
+                // Original sorting
+                frames = data.frames.sort((a, b) => a.frameIndex - b.frameIndex);
             }
             
             // Update observation time
@@ -729,28 +1733,106 @@
                 }
             }
             
-            // Build frame controls
+            // Build frame controls - always use fixed-width slider for consistency
             const controlsEl = document.getElementById('frame-controls');
-            controlsEl.innerHTML = frames.map((frame, idx) => `
-                <button class="frame-btn" data-frame="${idx}" onclick="showFrame(${idx})">
-                    Frame ${frame.frameIndex} (${frame.minutesAgo}m ago)
-                </button>
-            `).join('');
+            controlsEl.innerHTML = `
+                <div class="frame-slider-container">
+                    <div class="frame-slider-wrapper">
+                        <button class="frame-nav-btn" id="frame-first-btn" onclick="showFrame(0)" title="First frame" aria-label="First frame">⏮</button>
+                        <button class="frame-nav-btn" id="frame-prev-10-btn" onclick="jumpFrame(-10)" title="Go back 10 frames" aria-label="Go back 10 frames">-10</button>
+                        <input type="range" class="frame-slider" id="frame-slider" min="0" max="${frames.length - 1}" value="${currentFrameIndex}" 
+                               oninput="updateFrameFromSlider(parseInt(this.value))" aria-label="Frame slider">
+                        <button class="frame-nav-btn" id="frame-next-10-btn" onclick="jumpFrame(10)" title="Go forward 10 frames" aria-label="Go forward 10 frames">+10</button>
+                        <button class="frame-nav-btn" id="frame-last-btn" onclick="showFrame(${frames.length - 1})" title="Last frame" aria-label="Last frame">⏭</button>
+                    </div>
+                    <div class="frame-info-display">
+                        <div class="frame-info-item">
+                            <span class="frame-info-label">Frame:</span>
+                            <input type="number" class="frame-jump-input" id="frame-jump-input" min="0" max="${frames.length - 1}" value="0" 
+                                   onchange="jumpToFrame(parseInt(this.value))" 
+                                   onkeypress="if(event.key==='Enter') jumpToFrame(parseInt(this.value))">
+                            <span class="frame-info-value">/ ${frames.length - 1}</span>
+                        </div>
+                        <div class="frame-info-item">
+                            <span class="frame-info-label">Time:</span>
+                            <span class="frame-info-value" id="current-frame-time">-</span>
+                        </div>
+                        <div class="frame-info-item">
+                            <span class="frame-info-label">Progress:</span>
+                            <span class="frame-info-value" id="frame-progress">0%</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            // Update initial display
+            updateFrameSliderInfo(0);
             
             // Preload all frame images to prevent jiggle when switching
             preloadImages(frames);
             
-            // Show first frame
+            // Preserve slideshow state during refresh
             if (frames.length > 0) {
-                showFrame(0);
+                let frameToShow = 0;
+                const wasPlaying = isPlaying;
+                const previousFrameIndex = currentFrameIndex;
                 
-                // Auto-play if enabled and not already playing
-                if (settings.autoPlay && !isPlaying) {
+                // If we have a previous frame index and frames exist, try to preserve position
+                if (previousFrameIndex >= 0 && frames.length > 0) {
+                    // Try to find frame with matching absoluteObservationTime from previous frames
+                    if (radarData && radarData.frames && radarData.frames[previousFrameIndex]) {
+                        const previousFrame = radarData.frames[previousFrameIndex];
+                        if (previousFrame.absoluteObservationTime) {
+                            // Find frame with same absolute observation time
+                            const matchingIndex = frames.findIndex(f => 
+                                f.absoluteObservationTime === previousFrame.absoluteObservationTime
+                            );
+                            if (matchingIndex >= 0) {
+                                frameToShow = matchingIndex;
+                            } else {
+                                // Fallback: keep same index if valid, or find closest time
+                                if (previousFrameIndex < frames.length) {
+                                    frameToShow = previousFrameIndex;
+                                } else {
+                                    // Find closest frame by time
+                                    const previousTime = new Date(previousFrame.absoluteObservationTime).getTime();
+                                    let closestIndex = 0;
+                                    let closestDiff = Infinity;
+                                    frames.forEach((f, idx) => {
+                                        if (f.absoluteObservationTime) {
+                                            const diff = Math.abs(new Date(f.absoluteObservationTime).getTime() - previousTime);
+                                            if (diff < closestDiff) {
+                                                closestDiff = diff;
+                                                closestIndex = idx;
+                                            }
+                                        }
+                                    });
+                                    frameToShow = closestIndex;
+                                }
+                            }
+                        } else if (previousFrameIndex < frames.length) {
+                            // Fallback: keep same index if valid
+                            frameToShow = previousFrameIndex;
+                        }
+                    } else if (previousFrameIndex < frames.length) {
+                        // Fallback: keep same index if valid
+                        frameToShow = previousFrameIndex;
+                    }
+                }
+                
+                showFrame(frameToShow);
+                
+                // Restart play if it was playing before refresh
+                if (wasPlaying) {
+                    setTimeout(() => {
+                        if (!isPlaying) {
+                            play();
+                        }
+                    }, 100);
+                } else if (settings.autoPlay && !isPlaying) {
+                    // Auto-play on initial load only
                     setTimeout(() => play(), 500);
                 }
             }
-            
-            updateRelativeTimes();
         }
         
         // Preload all frame images to prevent jiggle
@@ -761,41 +1843,152 @@
             });
         }
         
+        // Update frame slider info display
+        function updateFrameSliderInfo(index) {
+            if (index < 0 || index >= frames.length) return;
+            
+            const frame = frames[index];
+            const progress = Math.round(((index + 1) / frames.length) * 100);
+            
+            // Update jump input
+            const jumpInput = document.getElementById('frame-jump-input');
+            if (jumpInput) {
+                jumpInput.value = index;
+            }
+            
+            // Update slider
+            const slider = document.getElementById('frame-slider');
+            if (slider) {
+                slider.value = index;
+            }
+            
+            // Update frame number display
+            const frameNumDisplay = document.getElementById('current-frame-num-display');
+            if (frameNumDisplay) {
+                frameNumDisplay.textContent = index + 1;
+            }
+            
+            // Update time display
+            const timeDisplay = document.getElementById('current-frame-time');
+            if (timeDisplay) {
+                if (isExtendedMode && frame.absoluteObservationTime) {
+                    timeDisplay.textContent = formatDate(frame.absoluteObservationTime);
+                } else if (frame.minutesAgo !== undefined) {
+                    timeDisplay.textContent = `${frame.minutesAgo} min ago`;
+                } else {
+                    timeDisplay.textContent = '-';
+                }
+            }
+            
+            // Update progress
+            const progressDisplay = document.getElementById('frame-progress');
+            if (progressDisplay) {
+                progressDisplay.textContent = `${progress}%`;
+            }
+            
+            // Update navigation buttons
+            const firstBtn = document.getElementById('frame-first-btn');
+            const prev10Btn = document.getElementById('frame-prev-10-btn');
+            const next10Btn = document.getElementById('frame-next-10-btn');
+            const lastBtn = document.getElementById('frame-last-btn');
+            
+            if (firstBtn) firstBtn.disabled = index === 0;
+            if (prev10Btn) prev10Btn.disabled = index === 0;
+            if (next10Btn) next10Btn.disabled = index >= frames.length - 1;
+            if (lastBtn) lastBtn.disabled = index >= frames.length - 1;
+        }
+        
+        // Update frame from slider (with debouncing for smooth updates)
+        let sliderUpdateTimeout;
+        function updateFrameFromSlider(value) {
+            clearTimeout(sliderUpdateTimeout);
+            sliderUpdateTimeout = setTimeout(() => {
+                showFrame(value);
+            }, 50); // Small delay for smoother slider experience
+        }
+        
+        // Jump to specific frame number
+        function jumpToFrame(frameNum) {
+            const index = Math.max(0, Math.min(frames.length - 1, frameNum));
+            showFrame(index);
+        }
+        
+        // Jump forward/backward by N frames
+        function jumpFrame(offset) {
+            const newIndex = Math.max(0, Math.min(frames.length - 1, currentFrameIndex + offset));
+            showFrame(newIndex);
+        }
+        
         // Show specific frame
         function showFrame(index) {
-            if (index < 0 || index >= frames.length) return;
+            if (index < 0 || index >= frames.length) {
+                console.error(`showFrame: Invalid index ${index}, frames.length = ${frames.length}`);
+                return;
+            }
+            
+            if (!frames[index]) {
+                console.error(`showFrame: Frame at index ${index} is undefined`);
+                return;
+            }
             
             currentFrameIndex = index;
             const frame = frames[index];
             
+            // Update slider info (always using slider now)
+            updateFrameSliderInfo(index);
+            
+            // Update active button state
+            document.querySelectorAll('.frame-btn').forEach(btn => {
+                btn.classList.remove('active');
+                if (parseInt(btn.getAttribute('data-frame')) === index) {
+                    btn.classList.add('active');
+                }
+            });
+            
             // Update image
             const imgEl = document.getElementById('radar-image');
             const loadingEl = document.getElementById('loading');
+            
+            // Build alt text based on mode
+            let altText;
+            if (isExtendedMode) {
+                const frameNum = frame.sequentialIndex !== undefined ? frame.sequentialIndex : index;
+                const timeInfo = frame.absoluteObservationTime 
+                    ? formatDate(frame.absoluteObservationTime)
+                    : (frame.cacheTimestamp ? formatDate(frame.cacheTimestamp) : '');
+                altText = `Radar frame ${frameNum}${timeInfo ? ' (' + timeInfo + ')' : ''}`;
+            } else {
+                altText = `Radar frame ${frame.frameIndex} (${frame.minutesAgo} minutes ago)`;
+            }
             
             // Check if image is already loaded (from preload)
             const preloadedImg = new Image();
             preloadedImg.onload = () => {
                 // Image is ready, switch immediately to prevent jiggle
                 imgEl.src = frame.imageUrl;
-                imgEl.alt = `Radar frame ${frame.frameIndex} (${frame.minutesAgo} minutes ago)`;
+                imgEl.alt = altText;
                 loadingEl.style.display = 'none';
                 imgEl.style.display = 'block';
             };
             preloadedImg.onerror = () => {
                 // Fallback if preload failed
                 imgEl.src = frame.imageUrl;
-                imgEl.alt = `Radar frame ${frame.frameIndex} (${frame.minutesAgo} minutes ago)`;
+                imgEl.alt = altText;
             };
             preloadedImg.src = frame.imageUrl;
             
             // Update frame info
-            document.getElementById('frame-info').textContent = 
-                `Frame ${frame.frameIndex} of ${frames.length - 1} • ${frame.minutesAgo} minutes ago`;
-            
-            // Update active button
-            document.querySelectorAll('.frame-btn').forEach((btn, idx) => {
-                btn.classList.toggle('active', idx === index);
-            });
+            if (isExtendedMode) {
+                const frameNum = frame.sequentialIndex !== undefined ? frame.sequentialIndex : index;
+                const timeInfo = frame.absoluteObservationTime 
+                    ? formatDate(frame.absoluteObservationTime)
+                    : (frame.cacheTimestamp ? formatDate(frame.cacheTimestamp) : '');
+                document.getElementById('frame-info').textContent = 
+                    `Frame ${frameNum} of ${frames.length - 1}${timeInfo ? ' • ' + timeInfo : ''}`;
+            } else {
+                document.getElementById('frame-info').textContent = 
+                    `Frame ${frame.frameIndex} of ${frames.length - 1} • ${frame.minutesAgo} minutes ago`;
+            }
         }
         
         // Play/pause slideshow
@@ -862,6 +2055,8 @@
                     refreshInterval = setInterval(refreshData, settings.refreshInterval * 1000);
                 }
             }
+            // Note: If data is null (e.g., 404), updateStatusForCacheUpdate was already called
+            // and status should already be updated, so we don't need to do anything here
         }
         
         // Settings modal management
@@ -873,6 +2068,48 @@
             document.getElementById('settings-modal').style.display = 'none';
         }
         
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            // Don't handle keyboard shortcuts if user is typing in an input
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                return;
+            }
+            
+            // Arrow keys for frame navigation
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                if (e.key === 'ArrowLeft') {
+                    if (e.shiftKey) {
+                        jumpFrame(-10); // Shift+Left: jump back 10
+                    } else {
+                        showFrame(Math.max(0, currentFrameIndex - 1)); // Left: previous frame
+                    }
+                } else {
+                    if (e.shiftKey) {
+                        jumpFrame(10); // Shift+Right: jump forward 10
+                    } else {
+                        showFrame(Math.min(frames.length - 1, currentFrameIndex + 1)); // Right: next frame
+                    }
+                }
+            }
+            
+            // Home/End for first/last frame
+            if (e.key === 'Home') {
+                e.preventDefault();
+                showFrame(0);
+            }
+            if (e.key === 'End') {
+                e.preventDefault();
+                showFrame(frames.length - 1);
+            }
+            
+            // Spacebar for play/pause
+            if (e.key === ' ' && frames.length > 0) {
+                e.preventDefault();
+                togglePlay();
+            }
+        });
+        
         // Initialize
         async function init() {
             // Load settings from cookies
@@ -882,18 +2119,54 @@
             document.getElementById('play-btn').addEventListener('click', togglePlay);
             document.getElementById('prev-btn').addEventListener('click', previousFrame);
             document.getElementById('next-btn').addEventListener('click', nextFrame);
-            document.getElementById('settings-btn').addEventListener('click', showSettings);
+            
+            // Settings button (now in header)
+            const settingsBtn = document.getElementById('settings-btn-header');
+            if (settingsBtn) {
+                settingsBtn.addEventListener('click', showSettings);
+            }
             document.getElementById('save-settings-btn').addEventListener('click', () => {
                 settings.frameInterval = parseFloat(document.getElementById('frame-interval-input').value) || 2.0;
                 settings.refreshInterval = parseInt(document.getElementById('refresh-interval-input').value) || 30;
                 settings.autoPlay = document.getElementById('auto-play-input').checked;
+                settings.timespan = document.getElementById('timespan-select').value;
+                
+                if (settings.timespan === 'custom') {
+                    // Store custom times if provided
+                    const startInput = document.getElementById('start-time-input');
+                    const endInput = document.getElementById('end-time-input');
+                    if (startInput && startInput.value) {
+                        settings.customStartTime = startInput.value;
+                    }
+                    if (endInput && endInput.value) {
+                        settings.customEndTime = endInput.value;
+                    }
+                }
+                
                 saveSettings();
                 hideSettings();
+                
+                // Reload data with new timespan
+                refreshData();
+            });
+            
+            // Handle timespan select change
+            document.getElementById('timespan-select').addEventListener('change', (e) => {
+                settings.timespan = e.target.value;
+                const customSection = document.getElementById('custom-range-section');
+                if (e.target.value === 'custom') {
+                    customSection.style.display = 'block';
+                } else {
+                    customSection.style.display = 'none';
+                }
             });
             document.getElementById('cancel-settings-btn').addEventListener('click', () => {
                 updateSettingsUI(); // Reset to current settings
                 hideSettings();
             });
+            
+            // Close button handler
+            document.getElementById('close-settings-btn').addEventListener('click', hideSettings);
             
             // Close modal on background click
             document.getElementById('settings-modal').addEventListener('click', (e) => {

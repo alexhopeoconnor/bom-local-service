@@ -1,3 +1,5 @@
+using BomLocalService.Models;
+
 namespace BomLocalService.Utilities;
 
 public static class FilePathHelper
@@ -51,12 +53,34 @@ public static class FilePathHelper
     }
 
     /// <summary>
-    /// Gets the frame file path within a cache folder.
-    /// Format: "{CacheFolderPath}/frame_{FrameIndex}.png"
+    /// Gets the data type subfolder path within a cache folder.
+    /// Format: "{CacheFolderPath}/{DataType}"
+    /// Example: "/app/cache/Pomona_QLD_20251207_000906/radar"
     /// </summary>
+    public static string GetDataTypeFolderPath(string cacheFolderPath, CachedDataType dataType)
+    {
+        var dataTypeFolder = dataType.ToString().ToLowerInvariant();
+        return Path.Combine(cacheFolderPath, dataTypeFolder);
+    }
+
+    /// <summary>
+    /// Gets the frame file path within a data type subfolder.
+    /// Format: "{CacheFolderPath}/{DataType}/frame_{FrameIndex}.png"
+    /// </summary>
+    public static string GetFrameFilePath(string cacheFolderPath, CachedDataType dataType, int frameIndex)
+    {
+        var dataTypeFolder = GetDataTypeFolderPath(cacheFolderPath, dataType);
+        return Path.Combine(dataTypeFolder, $"frame_{frameIndex}.png");
+    }
+
+    /// <summary>
+    /// Gets the frame file path within a cache folder (legacy - defaults to radar).
+    /// Format: "{CacheFolderPath}/radar/frame_{FrameIndex}.png"
+    /// </summary>
+    [Obsolete("Use GetFrameFilePath with dataType parameter")]
     public static string GetFrameFilePath(string cacheFolderPath, int frameIndex)
     {
-        return Path.Combine(cacheFolderPath, $"frame_{frameIndex}.png");
+        return GetFrameFilePath(cacheFolderPath, CachedDataType.Radar, frameIndex);
     }
 
     /// <summary>
@@ -90,12 +114,23 @@ public static class FilePathHelper
     }
 
     /// <summary>
-    /// Gets the frames metadata file path within a cache folder.
-    /// Format: "{CacheFolderPath}/frames.json"
+    /// Gets the frames metadata file path within a data type subfolder.
+    /// Format: "{CacheFolderPath}/{DataType}/frames.json"
     /// </summary>
+    public static string GetFramesMetadataFilePath(string cacheFolderPath, CachedDataType dataType)
+    {
+        var dataTypeFolder = GetDataTypeFolderPath(cacheFolderPath, dataType);
+        return Path.Combine(dataTypeFolder, "frames.json");
+    }
+
+    /// <summary>
+    /// Gets the frames metadata file path within a cache folder (legacy - defaults to radar).
+    /// Format: "{CacheFolderPath}/radar/frames.json"
+    /// </summary>
+    [Obsolete("Use GetFramesMetadataFilePath with dataType parameter")]
     public static string GetFramesMetadataFilePath(string cacheFolderPath)
     {
-        return Path.Combine(cacheFolderPath, "frames.json");
+        return GetFramesMetadataFilePath(cacheFolderPath, CachedDataType.Radar);
     }
 }
 

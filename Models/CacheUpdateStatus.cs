@@ -50,6 +50,7 @@ public class CacheUpdateStatus
     /// - "Cache is valid, no update needed" - Cache exists and is still fresh
     /// - "Cache is stale, update triggered" - Cache exists but expired, update initiated
     /// - "No cache exists, update triggered" - No cache found, update initiated
+    /// - "Cache update already in progress" - An update is currently running
     /// </summary>
     public string? Message { get; set; }
 }

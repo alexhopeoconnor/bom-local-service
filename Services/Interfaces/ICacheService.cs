@@ -9,18 +9,49 @@ namespace BomLocalService.Services.Interfaces;
 public interface ICacheService
 {
     /// <summary>
-    /// Gets the cached screenshot folder path and associated metadata for a location.
+    /// Gets the cached screenshot folder path and associated metadata for a location and data type.
     /// Searches for cache folders matching the location pattern and loads the corresponding metadata JSON file.
     /// </summary>
     /// <param name="suburb">The suburb name (e.g., "Pomona", "Brisbane")</param>
     /// <param name="state">The Australian state abbreviation (e.g., "QLD", "NSW", "VIC")</param>
+    /// <param name="dataType">The type of cached data to retrieve</param>
     /// <param name="excludeFolder">Optional folder path to exclude from search (e.g., folder currently being written to)</param>
     /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
     /// <returns>Tuple containing the cache folder path and metadata, or (null, null) if not found</returns>
     Task<(string? cacheFolderPath, LastUpdatedInfo? metadata)> GetCachedScreenshotWithMetadataAsync(
         string suburb, 
         string state, 
+        CachedDataType dataType,
         string? excludeFolder = null,
+        CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Gets all complete cache folders for a location, ordered by timestamp (oldest first).
+    /// Returns basic folder information without loading all frame data.
+    /// </summary>
+    /// <param name="suburb">The suburb name (e.g., "Pomona", "Brisbane")</param>
+    /// <param name="state">The Australian state abbreviation (e.g., "QLD", "NSW", "VIC")</param>
+    /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
+    /// <returns>List of cache folders with available data types</returns>
+    Task<List<CacheFolder>> GetAllCacheFoldersAsync(
+        string suburb, 
+        string state, 
+        CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Gets frames from a specific cache folder and data type.
+    /// </summary>
+    /// <param name="suburb">The suburb name (e.g., "Pomona", "Brisbane")</param>
+    /// <param name="state">The Australian state abbreviation (e.g., "QLD", "NSW", "VIC")</param>
+    /// <param name="cacheFolderName">The cache folder name</param>
+    /// <param name="dataType">The type of cached data to retrieve</param>
+    /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
+    /// <returns>List of cached frames, or empty list if not found</returns>
+    Task<List<CachedFrame>> GetFramesFromCacheFolderAsync(
+        string suburb,
+        string state,
+        string cacheFolderName,
+        CachedDataType dataType,
         CancellationToken cancellationToken = default);
     
     /// <summary>
@@ -59,12 +90,13 @@ public interface ICacheService
     Task SaveMetadataAsync(string cacheFolderPath, LastUpdatedInfo metadata, CancellationToken cancellationToken = default);
     
     /// <summary>
-    /// Saves frame metadata (frame index and minutes ago) to a frames.json file in the cache folder.
+    /// Saves frame metadata (frame index and minutes ago) to a frames.json file in the data type subfolder.
     /// </summary>
     /// <param name="cacheFolderPath">Full path to the cache folder</param>
+    /// <param name="dataType">The type of cached data</param>
     /// <param name="frames">List of frames with their metadata</param>
     /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
-    Task SaveFramesMetadataAsync(string cacheFolderPath, List<RadarFrame> frames, CancellationToken cancellationToken = default);
+    Task SaveFramesMetadataAsync(string cacheFolderPath, CachedDataType dataType, List<RadarFrame> frames, CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Checks if cached metadata is still valid (not expired).
@@ -107,5 +139,61 @@ public interface ICacheService
     /// </summary>
     /// <returns>The number of incomplete folders that were deleted</returns>
     int CleanupIncompleteCacheFolders();
+    
+    /// <summary>
+    /// Checks if a location is currently being updated (has an active cache folder being written to).
+    /// </summary>
+    bool IsLocationUpdating(string locationKey);
+    
+    /// <summary>
+    /// Gets the active cache folder path for a location (if one is being written to).
+    /// </summary>
+    string? GetActiveCacheFolder(string locationKey);
+    
+    /// <summary>
+    /// Sets the active cache folder for a location (indicates a cache update is in progress).
+    /// </summary>
+    void SetActiveCacheFolder(string locationKey, string cacheFolderPath);
+    
+    /// <summary>
+    /// Clears the active cache folder for a location (indicates cache update is complete).
+    /// </summary>
+    void ClearActiveCacheFolder(string locationKey);
+    
+    /// <summary>
+    /// Creates a new cache folder for a location and timestamp.
+    /// Creates the folder structure and ensures data type subfolders are ready.
+    /// </summary>
+    string CreateCacheFolder(string suburb, string state, string timestamp);
+    
+    /// <summary>
+    /// Deletes an incomplete cache folder (cleanup on error).
+    /// Only deletes if the folder is incomplete (missing required files).
+    /// </summary>
+    bool TryDeleteIncompleteCacheFolder(string cacheFolderPath);
+    
+    /// <summary>
+    /// Deletes an empty cache folder.
+    /// </summary>
+    bool TryDeleteEmptyCacheFolder(string cacheFolderPath);
+    
+    /// <summary>
+    /// Gets cache status information for a location and data type without triggering an update.
+    /// Returns information about whether cache exists, is valid, is updating, etc.
+    /// </summary>
+    /// <param name="suburb">The suburb name (e.g., "Pomona", "Brisbane")</param>
+    /// <param name="state">The Australian state abbreviation (e.g., "QLD", "NSW", "VIC")</param>
+    /// <param name="dataType">The type of cached data to check</param>
+    /// <param name="cacheExpirationMinutes">The number of minutes after observation time that cache expires (will be cast to int)</param>
+    /// <param name="cacheManagementCheckIntervalMinutes">The interval in minutes that the background cache management service checks for updates</param>
+    /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
+    /// <returns>Cache status information</returns>
+    Task<CacheUpdateStatus> GetCacheStatusAsync(
+        string suburb, 
+        string state, 
+        CachedDataType dataType,
+        int cacheExpirationMinutes,
+        int cacheManagementCheckIntervalMinutes,
+        CancellationToken cancellationToken = default);
 }
 

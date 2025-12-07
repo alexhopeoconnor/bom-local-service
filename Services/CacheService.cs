@@ -1,6 +1,7 @@
 using BomLocalService.Models;
 using BomLocalService.Services.Interfaces;
 using BomLocalService.Utilities;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace BomLocalService.Services;
@@ -10,10 +11,13 @@ public class CacheService : ICacheService
     private readonly ILogger<CacheService> _logger;
     private readonly string _cacheDirectory;
     private readonly double _cacheExpirationMinutes;
+    private readonly IConfiguration _configuration;
+    private readonly ConcurrentDictionary<string, string> _activeCacheFolders = new(); // locationKey -> cacheFolderPath
 
     public CacheService(ILogger<CacheService> logger, IConfiguration configuration)
     {
         _logger = logger;
+        _configuration = configuration;
         _cacheDirectory = FilePathHelper.GetCacheDirectory(configuration);
         _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 15.5);
         
@@ -22,11 +26,12 @@ public class CacheService : ICacheService
     }
 
     /// <summary>
-    /// Gets the cached screenshot folder path and metadata for a location
+    /// Gets the cached screenshot folder path and metadata for a location and data type
     /// </summary>
     public async Task<(string? cacheFolderPath, LastUpdatedInfo? metadata)> GetCachedScreenshotWithMetadataAsync(
         string suburb, 
         string state, 
+        CachedDataType dataType,
         string? excludeFolder = null,
         CancellationToken cancellationToken = default)
     {
@@ -48,7 +53,7 @@ public class CacheService : ICacheService
             })
             .ToList();
 
-        // Find the first complete cache folder (has all 7 frames + metadata)
+        // Find the first complete cache folder for the specified data type
         foreach (var folder in folders)
         {
             if (!Directory.Exists(folder))
@@ -61,10 +66,10 @@ public class CacheService : ICacheService
                 continue;
             }
             
-            // Check if folder is complete: must have all 7 frames, metadata.json, and frames.json
-            if (!CacheHelper.IsCacheFolderComplete(folder))
+            // Check if folder is complete for the specified data type
+            if (!CacheHelper.IsCacheFolderCompleteForDataType(folder, dataType, _configuration))
             {
-                _logger.LogDebug("Skipping incomplete cache folder: {Folder}", folder);
+                _logger.LogDebug("Skipping incomplete cache folder for {DataType}: {Folder}", dataType, folder);
                 continue; // Skip incomplete folders (currently being written to)
             }
             
@@ -85,40 +90,15 @@ public class CacheService : ICacheService
         string state, 
         CancellationToken cancellationToken = default)
     {
-        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, null, cancellationToken);
+        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, null, cancellationToken);
         
         if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
         {
             return new List<RadarFrame>();
         }
         
-        var frames = new List<RadarFrame>();
-        
-        // Load frame metadata from frames.json if available
-        var framesMetadata = await LoadFramesMetadataAsync(cacheFolderPath, cancellationToken);
-        var metadataDict = framesMetadata.ToDictionary(f => f.FrameIndex, f => f.MinutesAgo);
-        
-        // Load frames from folder (frame_0.png through frame_6.png)
-        for (int i = 0; i < 7; i++)
-        {
-            var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, i);
-            if (File.Exists(framePath))
-            {
-                // Use stored minutesAgo if available, otherwise default
-                var minutesAgo = metadataDict.ContainsKey(i) 
-                    ? metadataDict[i] 
-                    : 40 - (i * 5);
-                    
-                frames.Add(new RadarFrame
-                {
-                    FrameIndex = i,
-                    ImagePath = framePath,
-                    MinutesAgo = minutesAgo
-                });
-            }
-        }
-        
-        return frames;
+        var cachedFrames = await GetFramesFromCacheFolderAsync(suburb, state, Path.GetFileName(cacheFolderPath), CachedDataType.Radar, cancellationToken);
+        return cachedFrames.Cast<RadarFrame>().ToList();
     }
     
     /// <summary>
@@ -130,26 +110,27 @@ public class CacheService : ICacheService
         int frameIndex,
         CancellationToken cancellationToken = default)
     {
-        if (frameIndex < 0 || frameIndex > 6)
+        var frameCount = CacheHelper.GetFrameCountForDataType(_configuration, CachedDataType.Radar);
+        if (frameIndex < 0 || frameIndex >= frameCount)
         {
             return null;
         }
         
-        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, null, cancellationToken);
+        var (cacheFolderPath, _) = await GetCachedScreenshotWithMetadataAsync(suburb, state, CachedDataType.Radar, null, cancellationToken);
         
         if (string.IsNullOrEmpty(cacheFolderPath))
         {
             return null;
         }
         
-        var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, frameIndex);
+        var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, CachedDataType.Radar, frameIndex);
         if (!File.Exists(framePath))
         {
             return null;
         }
         
         // Load frame metadata to get accurate minutesAgo
-        var framesMetadata = await LoadFramesMetadataAsync(cacheFolderPath, cancellationToken);
+        var framesMetadata = await LoadFramesMetadataAsync(cacheFolderPath, CachedDataType.Radar, cancellationToken);
         var frameMetadata = framesMetadata.FirstOrDefault(f => f.FrameIndex == frameIndex);
         var minutesAgo = frameMetadata != null 
             ? frameMetadata.MinutesAgo 
@@ -185,9 +166,9 @@ public class CacheService : ICacheService
     }
     
     /// <summary>
-    /// Saves frame metadata to frames.json
+    /// Saves frame metadata to frames.json in the data type subfolder
     /// </summary>
-    public async Task SaveFramesMetadataAsync(string cacheFolderPath, List<RadarFrame> frames, CancellationToken cancellationToken = default)
+    public async Task SaveFramesMetadataAsync(string cacheFolderPath, CachedDataType dataType, List<RadarFrame> frames, CancellationToken cancellationToken = default)
     {
         try
         {
@@ -197,7 +178,13 @@ public class CacheService : ICacheService
                 MinutesAgo = f.MinutesAgo
             }).ToList();
             
-            var framesPath = Path.Combine(cacheFolderPath, "frames.json");
+            var framesPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath, dataType);
+            var framesDir = Path.GetDirectoryName(framesPath);
+            if (!string.IsNullOrEmpty(framesDir) && !Directory.Exists(framesDir))
+            {
+                Directory.CreateDirectory(framesDir);
+            }
+            
             var json = JsonSerializer.Serialize(framesMetadata, new JsonSerializerOptions { WriteIndented = true });
             await File.WriteAllTextAsync(framesPath, json, CancellationToken.None);
             _logger.LogDebug("Saved frames metadata to: {Path}", framesPath);
@@ -209,11 +196,11 @@ public class CacheService : ICacheService
     }
     
     /// <summary>
-    /// Loads frame metadata from frames.json
+    /// Loads frame metadata from frames.json in the data type subfolder
     /// </summary>
-    private async Task<List<FrameMetadata>> LoadFramesMetadataAsync(string cacheFolderPath, CancellationToken cancellationToken = default)
+    private async Task<List<FrameMetadata>> LoadFramesMetadataAsync(string cacheFolderPath, CachedDataType dataType, CancellationToken cancellationToken = default)
     {
-        var framesPath = Path.Combine(cacheFolderPath, "frames.json");
+        var framesPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath, dataType);
         if (!File.Exists(framesPath))
         {
             return new List<FrameMetadata>();
@@ -325,6 +312,120 @@ public class CacheService : ICacheService
     }
 
     /// <summary>
+    /// Gets all complete cache folders for a location, ordered by timestamp (oldest first)
+    /// </summary>
+    public async Task<List<CacheFolder>> GetAllCacheFoldersAsync(
+        string suburb, 
+        string state, 
+        CancellationToken cancellationToken = default)
+    {
+        var pattern = FilePathHelper.GetCacheFolderPattern(suburb, state);
+        var folders = Directory.GetDirectories(_cacheDirectory, pattern)
+            .Select(f =>
+            {
+                var folderName = Path.GetFileName(f);
+                var timestamp = LocationHelper.ParseTimestampFromFilename(folderName);
+                return new { Folder = f, FolderName = folderName, Timestamp = timestamp };
+            })
+            .Where(x => x.Timestamp.HasValue)
+            .Select(x => new { x.Folder, x.FolderName, Timestamp = x.Timestamp!.Value })
+            .OrderBy(x => x.Timestamp) // Oldest first
+            .ToList();
+
+        var result = new List<CacheFolder>();
+        
+        foreach (var folder in folders)
+        {
+            if (!Directory.Exists(folder.Folder))
+                continue;
+            
+            var metadata = await LoadMetadataAsync(folder.Folder, cancellationToken);
+            if (metadata == null)
+                continue;
+            
+            // Check which data types are available in this folder
+            var availableDataTypes = new List<CachedDataType>();
+            if (CacheHelper.IsCacheFolderCompleteForDataType(folder.Folder, CachedDataType.Radar, _configuration))
+            {
+                availableDataTypes.Add(CachedDataType.Radar);
+            }
+            
+            if (availableDataTypes.Count > 0)
+            {
+                result.Add(new CacheFolder
+                {
+                    FolderName = folder.FolderName,
+                    CacheTimestamp = folder.Timestamp,
+                    ObservationTime = metadata.ObservationTime,
+                    AvailableDataTypes = availableDataTypes,
+                    IsComplete = true
+                });
+            }
+        }
+        
+        return result;
+    }
+    
+    /// <summary>
+    /// Gets frames from a specific cache folder and data type
+    /// </summary>
+    public async Task<List<CachedFrame>> GetFramesFromCacheFolderAsync(
+        string suburb,
+        string state,
+        string cacheFolderName,
+        CachedDataType dataType,
+        CancellationToken cancellationToken = default)
+    {
+        var folderPath = Path.Combine(_cacheDirectory, cacheFolderName);
+        
+        if (!Directory.Exists(folderPath))
+        {
+            return new List<CachedFrame>();
+        }
+        
+        var frameCount = CacheHelper.GetFrameCountForDataType(_configuration, dataType);
+        var frames = new List<CachedFrame>();
+        
+        // Load frame metadata from frames.json if available
+        var framesMetadata = await LoadFramesMetadataAsync(folderPath, dataType, cancellationToken);
+        var metadataDict = framesMetadata.ToDictionary(f => f.FrameIndex, f => f.MinutesAgo);
+        
+        // Load frames from data type subfolder
+        for (int i = 0; i < frameCount; i++)
+        {
+            var framePath = FilePathHelper.GetFrameFilePath(folderPath, dataType, i);
+            if (File.Exists(framePath))
+            {
+                if (dataType == CachedDataType.Radar)
+                {
+                    var minutesAgo = metadataDict.ContainsKey(i) 
+                        ? metadataDict[i] 
+                        : 40 - (i * 5);
+                    
+                    frames.Add(new RadarFrame
+                    {
+                        FrameIndex = i,
+                        ImagePath = framePath,
+                        MinutesAgo = minutesAgo
+                    });
+                }
+                else
+                {
+                    // For future data types, create base CachedFrame
+                    frames.Add(new CachedFrame
+                    {
+                        FrameIndex = i,
+                        ImagePath = framePath,
+                        DataType = dataType
+                    });
+                }
+            }
+        }
+        
+        return frames;
+    }
+
+    /// <summary>
     /// Gets the cache directory path
     /// </summary>
     public string GetCacheDirectory() => _cacheDirectory;
@@ -352,8 +453,8 @@ public class CacheService : ICacheService
             {
                 try
                 {
-                    // Check if folder is incomplete
-                    if (!CacheHelper.IsCacheFolderComplete(folder))
+                    // Check if folder is incomplete (check for radar data type)
+                    if (!CacheHelper.IsCacheFolderCompleteForDataType(folder, CachedDataType.Radar, _configuration))
                     {
                         _logger.LogInformation("Found incomplete cache folder from previous session, deleting: {Folder}", Path.GetFileName(folder));
                         Directory.Delete(folder, recursive: true);
@@ -381,6 +482,148 @@ public class CacheService : ICacheService
         }
         
         return deletedCount;
+    }
+    
+    public bool IsLocationUpdating(string locationKey)
+    {
+        return _activeCacheFolders.ContainsKey(locationKey);
+    }
+    
+    public string? GetActiveCacheFolder(string locationKey)
+    {
+        return _activeCacheFolders.TryGetValue(locationKey, out var folder) ? folder : null;
+    }
+    
+    public void SetActiveCacheFolder(string locationKey, string cacheFolderPath)
+    {
+        _activeCacheFolders[locationKey] = cacheFolderPath;
+        _logger.LogDebug("Tracking active cache folder: {Folder} for location: {Location}", cacheFolderPath, locationKey);
+    }
+    
+    public void ClearActiveCacheFolder(string locationKey)
+    {
+        if (_activeCacheFolders.TryRemove(locationKey, out var folder))
+        {
+            _logger.LogDebug("Cleared active cache folder tracking: {Folder} for location: {Location}", folder, locationKey);
+        }
+    }
+    
+    public string CreateCacheFolder(string suburb, string state, string timestamp)
+    {
+        var cacheFolderPath = FilePathHelper.GetCacheFolderPath(_cacheDirectory, suburb, state, timestamp);
+        Directory.CreateDirectory(cacheFolderPath);
+        
+        // Create radar subfolder structure (for future: create other data type folders as needed)
+        var radarFolder = FilePathHelper.GetDataTypeFolderPath(cacheFolderPath, CachedDataType.Radar);
+        Directory.CreateDirectory(radarFolder);
+        
+        _logger.LogDebug("Created cache folder: {Folder}", cacheFolderPath);
+        return cacheFolderPath;
+    }
+    
+    public bool TryDeleteIncompleteCacheFolder(string cacheFolderPath)
+    {
+        if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
+        {
+            return false;
+        }
+        
+        try
+        {
+            // Check if folder is incomplete for radar data type
+            if (!CacheHelper.IsCacheFolderCompleteForDataType(cacheFolderPath, CachedDataType.Radar, _configuration))
+            {
+                Directory.Delete(cacheFolderPath, recursive: true);
+                _logger.LogDebug("Deleted incomplete cache folder: {Folder}", cacheFolderPath);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete incomplete cache folder: {Folder}", cacheFolderPath);
+        }
+        
+        return false;
+    }
+    
+    public bool TryDeleteEmptyCacheFolder(string cacheFolderPath)
+    {
+        if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
+        {
+            return false;
+        }
+        
+        try
+        {
+            var files = Directory.GetFiles(cacheFolderPath, "*", SearchOption.AllDirectories);
+            if (files.Length == 0)
+            {
+                Directory.Delete(cacheFolderPath, recursive: true);
+                _logger.LogDebug("Deleted empty cache folder: {Folder}", cacheFolderPath);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete empty cache folder: {Folder}", cacheFolderPath);
+        }
+        
+        return false;
+    }
+
+    public async Task<CacheUpdateStatus> GetCacheStatusAsync(
+        string suburb, 
+        string state, 
+        CachedDataType dataType,
+        int cacheExpirationMinutes,
+        int cacheManagementCheckIntervalMinutes,
+        CancellationToken cancellationToken = default)
+    {
+        var status = new CacheUpdateStatus();
+        var locationKey = LocationHelper.GetLocationKey(suburb, state);
+        
+        // Check if an update is already in progress
+        var isUpdating = IsLocationUpdating(locationKey);
+        var excludeFolder = GetActiveCacheFolder(locationKey);
+        var (cacheFolderPath, cachedMetadata) = await GetCachedScreenshotWithMetadataAsync(suburb, state, dataType, excludeFolder, cancellationToken);
+        
+        status.CacheExists = !string.IsNullOrEmpty(cacheFolderPath) && Directory.Exists(cacheFolderPath);
+        
+        if (cachedMetadata != null)
+        {
+            status.CacheIsValid = IsCacheValid(cachedMetadata);
+            status.CacheExpiresAt = cachedMetadata.ObservationTime.AddMinutes(cacheExpirationMinutes);
+        }
+        else
+        {
+            status.CacheIsValid = false;
+        }
+        
+        // Set update status - if an update is in progress, UpdateTriggered would be false but Message indicates it
+        // For GetCacheStatusAsync, we don't trigger updates, but we can indicate if one is in progress
+        status.UpdateTriggered = false; // This method doesn't trigger updates
+        if (isUpdating)
+        {
+            status.Message = "Cache update already in progress";
+            // Update in progress - estimate completion in ~2 minutes
+            status.NextUpdateTime = DateTime.UtcNow.AddMinutes(2);
+        }
+        else if (status.CacheIsValid && status.CacheExpiresAt.HasValue)
+        {
+            // Cache is valid - next update will be when cache expires
+            status.Message = "Cache is valid, no update needed";
+            status.NextUpdateTime = status.CacheExpiresAt.Value;
+        }
+        else
+        {
+            // Cache is invalid/missing - next update would be after background service check
+            status.Message = status.CacheExists ? "Cache is stale" : "No cache exists";
+            var now = DateTime.UtcNow;
+            var minutesUntilNextCheck = cacheManagementCheckIntervalMinutes - (now.Minute % cacheManagementCheckIntervalMinutes);
+            status.NextUpdateTime = now.AddMinutes(minutesUntilNextCheck);
+        }
+        
+        return status;
     }
 }
 

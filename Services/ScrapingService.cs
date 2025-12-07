@@ -450,6 +450,7 @@ public class ScrapingService : IScrapingService
             // Step 15-21: Capture all 7 frames
             var frames = new List<RadarFrame>();
             var stepForwardButton = page.Locator("button[data-testid='bom-scrub-utils__right__step-forward']").First;
+            int? previousMinutesAgo = null;
 
             for (int frameIndex = 0; frameIndex < 7; frameIndex++)
             {
@@ -468,8 +469,32 @@ public class ScrapingService : IScrapingService
                     _logger.LogWarning("Failed to extract minutes from display label for frame {FrameIndex}, using default: {MinutesAgo}", frameIndex, minutesAgo);
                 }
                 
+                // Validate that minutesAgo is different from previous frame (unless it's frame 0)
+                if (frameIndex > 0 && previousMinutesAgo.HasValue && minutesAgo == previousMinutesAgo.Value)
+                {
+                    _logger.LogWarning("Frame {FrameIndex} has same minutesAgo ({MinutesAgo}) as previous frame. Waiting for display to update...", frameIndex, minutesAgo);
+                    // Wait for display label to change
+                    await WaitForDisplayLabelToChangeAsync(page, previousMinutesAgo.Value);
+                    // Re-extract after waiting
+                    minutesAgo = await ExtractMinutesAgoFromDisplayAsync(page);
+                    if (minutesAgo == null || minutesAgo == previousMinutesAgo.Value)
+                    {
+                        // Still same or failed - use calculated fallback
+                        var (_, defaultMinutesAgo) = frameInfo[frameIndex];
+                        minutesAgo = defaultMinutesAgo;
+                        _logger.LogWarning("Display label did not update for frame {FrameIndex}, using calculated default: {MinutesAgo}", frameIndex, minutesAgo);
+                    }
+                }
+                
                 // Take screenshot with crop configuration
-                var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, frameIndex);
+                // Ensure radar subfolder exists
+                var radarFolder = FilePathHelper.GetDataTypeFolderPath(cacheFolderPath, CachedDataType.Radar);
+                if (!Directory.Exists(radarFolder))
+                {
+                    Directory.CreateDirectory(radarFolder);
+                }
+                
+                var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, CachedDataType.Radar, frameIndex);
                 await CaptureMapScreenshotAsync(page, mapContainer, framePath, containerClip);
                 
                 frames.Add(new RadarFrame
@@ -478,6 +503,8 @@ public class ScrapingService : IScrapingService
                     ImagePath = framePath,
                     MinutesAgo = minutesAgo.Value
                 });
+                
+                previousMinutesAgo = minutesAgo;
                 
                 _logger.LogInformation("Frame {FrameIndex} saved: {Path} ({MinutesAgo} minutes ago)", 
                     frameIndex, framePath, minutesAgo.Value);
@@ -488,32 +515,25 @@ public class ScrapingService : IScrapingService
                 // If not the last frame, click step forward to prepare for next frame
                 if (frameIndex < 6)
                 {
-                    // Wait for any modal overlays to disappear before clicking
-                    try
-                    {
-                        await page.WaitForFunctionAsync(@"() => {
-                            const overlay = document.querySelector('.bom-modal-overlay--after-open');
-                            return !overlay || overlay.style.display === 'none';
-                        }", new PageWaitForFunctionOptions { Timeout = 5000 });
-                    }
-                    catch
-                    {
-                        // If overlay doesn't disappear, try to dismiss it by clicking outside or pressing Escape
-                        try
-                        {
-                            await page.Keyboard.PressAsync("Escape");
-                            await page.WaitForTimeoutAsync(500);
-                        }
-                        catch
-                        {
-                            // Ignore if Escape doesn't work
-                        }
-                    }
+                    // Dismiss any modal overlays (BOM, reCAPTCHA, feedback forms) before clicking
+                    await DismissModalOverlaysAsync(page);
+                    
+                    // Get current minutesAgo before clicking (to detect change)
+                    var currentMinutesAgo = await ExtractMinutesAgoFromDisplayAsync(page);
                     
                     // Use force click to bypass any remaining overlays
                     await stepForwardButton.ClickAsync(new LocatorClickOptions { Force = true });
-                    // Wait for map to update to next frame
-                    await page.WaitForTimeoutAsync(1000); // Wait for frame transition
+                    
+                    // Wait for display label to actually change (not just a fixed timeout)
+                    if (currentMinutesAgo.HasValue)
+                    {
+                        await WaitForDisplayLabelToChangeAsync(page, currentMinutesAgo.Value);
+                    }
+                    else
+                    {
+                        // Fallback to fixed wait if we can't detect change
+                        await page.WaitForTimeoutAsync(1000);
+                    }
                 }
             }
 
@@ -521,7 +541,7 @@ public class ScrapingService : IScrapingService
 
             // Step 22: Save metadata and frame information
             await _cacheService.SaveMetadataAsync(cacheFolderPath, lastUpdatedInfo, cancellationToken);
-            await _cacheService.SaveFramesMetadataAsync(cacheFolderPath, frames, cancellationToken);
+            await _cacheService.SaveFramesMetadataAsync(cacheFolderPath, CachedDataType.Radar, frames, cancellationToken);
 
             // Step 23: Return response with all frames
             // Note: ScrapingService doesn't have access to cache management check interval
@@ -676,6 +696,139 @@ public class ScrapingService : IScrapingService
     }
 
     /// <summary>
+    /// Waits for the display label to change from the current minutesAgo value
+    /// </summary>
+    private async Task WaitForDisplayLabelToChangeAsync(IPage page, int currentMinutesAgo, int maxWaitMs = 5000)
+    {
+        try
+        {
+            var startTime = DateTime.UtcNow;
+            while ((DateTime.UtcNow - startTime).TotalMilliseconds < maxWaitMs)
+            {
+                var newMinutesAgo = await ExtractMinutesAgoFromDisplayAsync(page);
+                if (newMinutesAgo.HasValue && newMinutesAgo.Value != currentMinutesAgo)
+                {
+                    // Display has changed
+                    return;
+                }
+                await page.WaitForTimeoutAsync(200); // Check every 200ms
+            }
+            _logger.LogDebug("Display label did not change from {CurrentMinutesAgo} within {MaxWaitMs}ms", currentMinutesAgo, maxWaitMs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error waiting for display label to change");
+        }
+    }
+
+    /// <summary>
+    /// Dismisses any modal overlays (BOM modals, reCAPTCHA, feedback forms) that might block the radar
+    /// Uses a single efficient check and minimal delays
+    /// </summary>
+    private async Task DismissModalOverlaysAsync(IPage page)
+    {
+        try
+        {
+            // Single check for all modal types (BOM, reCAPTCHA, feedback forms)
+            var hasModal = await page.EvaluateAsync<bool>(@"() => {
+                // Check BOM modal overlay
+                const bomOverlay = document.querySelector('.bom-modal-overlay--after-open');
+                if (bomOverlay && bomOverlay.style.display !== 'none') {
+                    return true;
+                }
+                
+                // Check reCAPTCHA modals (large visible elements)
+                const recaptchaSelectors = [
+                    '.g-recaptcha',
+                    '#g-recaptcha',
+                    '.rc-anchor-container'
+                ];
+                for (const selector of recaptchaSelectors) {
+                    const el = document.querySelector(selector);
+                    if (el) {
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && 
+                            rect.width > 200 && rect.height > 200) {
+                            return true;
+                        }
+                    }
+                }
+                
+                // Check feedback forms with reCAPTCHA
+                const allForms = document.querySelectorAll('form');
+                for (const form of allForms) {
+                    const action = form.getAttribute('action') || '';
+                    const id = form.getAttribute('id') || '';
+                    if (action.includes('feedback') || id.includes('feedback')) {
+                        const style = window.getComputedStyle(form);
+                        const rect = form.getBoundingClientRect();
+                        if (style.display !== 'none' && rect.width > 200 && rect.height > 200) {
+                            const text = form.textContent || '';
+                            if (text.includes('reCAPTCHA') || text.includes('recaptcha') || text.includes('Tell us why')) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                
+                return false;
+            }");
+            
+            if (!hasModal)
+            {
+                return; // No modal, exit quickly
+            }
+            
+            _logger.LogDebug("Modal overlay detected, dismissing");
+            
+            // Single Escape key press (works for most modals)
+            await page.Keyboard.PressAsync("Escape");
+            await page.WaitForTimeoutAsync(300); // Minimal delay
+            
+            // If still visible, try clicking outside (on map)
+            var stillVisible = await page.EvaluateAsync<bool>(@"() => {
+                const bomOverlay = document.querySelector('.bom-modal-overlay--after-open');
+                if (bomOverlay && bomOverlay.style.display !== 'none') return true;
+                
+                // Check feedback forms
+                const allForms = document.querySelectorAll('form');
+                for (const form of allForms) {
+                    const action = form.getAttribute('action') || '';
+                    const id = form.getAttribute('id') || '';
+                    if (action.includes('feedback') || id.includes('feedback')) {
+                        const style = window.getComputedStyle(form);
+                        const rect = form.getBoundingClientRect();
+                        if (style.display !== 'none' && rect.width > 200 && rect.height > 200) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }");
+            
+            if (stillVisible)
+            {
+                // Click on map to dismiss (only if Escape didn't work)
+                try
+                {
+                    var mapContainer = page.Locator(".esri-view-surface").First;
+                    await mapContainer.ClickAsync(new LocatorClickOptions { Force = true });
+                    await page.WaitForTimeoutAsync(200); // Minimal delay
+                }
+                catch
+                {
+                    // Ignore if click fails
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error dismissing modal overlay, continuing");
+        }
+    }
+
+    /// <summary>
     /// Captures map screenshot with crop configuration
     /// </summary>
     private async Task CaptureMapScreenshotAsync(IPage page, ILocator mapContainer, string outputPath, Clip containerClip)
@@ -720,6 +873,9 @@ public class ScrapingService : IScrapingService
         {
             // Continue if network idle timeout - fonts may already be loaded
         }
+        
+        // Dismiss any modal overlays (BOM, reCAPTCHA, feedback forms) before taking screenshot
+        await DismissModalOverlaysAsync(page);
         
         // Take high-quality screenshot with explicit PNG format and disabled animations
         await page.ScreenshotAsync(new PageScreenshotOptions

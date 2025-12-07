@@ -1,3 +1,6 @@
+using BomLocalService.Models;
+using Microsoft.Extensions.Configuration;
+
 namespace BomLocalService.Utilities;
 
 /// <summary>
@@ -6,46 +9,57 @@ namespace BomLocalService.Utilities;
 public static class CacheHelper
 {
     /// <summary>
-    /// Checks if a cache folder is complete (has all required files).
-    /// A complete cache folder must have:
-    /// - All 7 frame images (frame_0.png through frame_6.png)
-    /// - metadata.json file
-    /// - frames.json file
+    /// Gets the configured frame count for a data type from configuration.
     /// </summary>
-    /// <param name="cacheFolderPath">The path to the cache folder to check</param>
-    /// <returns>True if the folder is complete, false otherwise</returns>
-    public static bool IsCacheFolderComplete(string cacheFolderPath)
+    public static int GetFrameCountForDataType(IConfiguration configuration, CachedDataType dataType)
+    {
+        var dataTypeName = dataType.ToString();
+        var frameCount = configuration.GetValue<int>($"CachedDataTypes:{dataTypeName}:FrameCount", 7);
+        return frameCount;
+    }
+
+    /// <summary>
+    /// Checks if a cache folder has complete data for a specific data type.
+    /// </summary>
+    public static bool IsCacheFolderCompleteForDataType(string cacheFolderPath, CachedDataType dataType, IConfiguration configuration)
     {
         if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
         {
             return false;
         }
 
-        // Check for all 7 frames
-        for (int i = 0; i < 7; i++)
+        var dataTypeFolder = FilePathHelper.GetDataTypeFolderPath(cacheFolderPath, dataType);
+        if (!Directory.Exists(dataTypeFolder))
         {
-            var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, i);
+            return false;
+        }
+
+        var expectedFrameCount = GetFrameCountForDataType(configuration, dataType);
+        for (int i = 0; i < expectedFrameCount; i++)
+        {
+            var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, dataType, i);
             if (!File.Exists(framePath))
             {
                 return false;
             }
         }
 
-        // Check for metadata.json
-        var metadataPath = FilePathHelper.GetMetadataFilePath(cacheFolderPath);
-        if (!File.Exists(metadataPath))
-        {
-            return false;
-        }
-
-        // Check for frames.json
-        var framesMetadataPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath);
+        // Check for frames.json in data type folder
+        var framesMetadataPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath, dataType);
         if (!File.Exists(framesMetadataPath))
         {
             return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Checks if a cache folder is complete (has radar data - for backward compatibility).
+    /// </summary>
+    public static bool IsCacheFolderComplete(string cacheFolderPath, IConfiguration configuration)
+    {
+        return IsCacheFolderCompleteForDataType(cacheFolderPath, CachedDataType.Radar, configuration);
     }
 }
 

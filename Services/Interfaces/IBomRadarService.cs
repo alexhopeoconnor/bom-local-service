@@ -75,5 +75,31 @@ public interface IBomRadarService
     /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
     /// <returns>The cached frame, or null if not found</returns>
     Task<RadarFrame?> GetCachedFrameAsync(string suburb, string state, int frameIndex, CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Gets information about the available cache range for a location (oldest and newest cache folders).
+    /// </summary>
+    Task<CacheRange> GetCacheRangeAsync(string suburb, string state, CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Gets historical radar data (frames from multiple cache folders) between specified timestamps.
+    /// Radar frames can be joined across cache folders because they represent a historical time series.
+    /// </summary>
+    Task<RadarTimeSeriesResponse> GetRadarTimeSeriesAsync(
+        string suburb, 
+        string state, 
+        DateTime? startTime, 
+        DateTime? endTime, 
+        CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Gets a specific radar frame from a specific cache folder.
+    /// </summary>
+    Task<RadarFrame?> GetFrameFromCacheFolderAsync(
+        string suburb, 
+        string state, 
+        string cacheFolderName,
+        int frameIndex, 
+        CancellationToken cancellationToken = default);
 }
 
