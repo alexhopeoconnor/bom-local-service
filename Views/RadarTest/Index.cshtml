@@ -1,0 +1,903 @@
+@{
+    ViewData["Title"] = $"BOM Radar Test - {ViewBag.Suburb}, {ViewBag.State}";
+    var apiBaseUrl = ViewBag.ApiBaseUrl as string ?? "";
+    var suburb = ViewBag.Suburb as string ?? "";
+    var state = ViewBag.State as string ?? "";
+}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>@ViewData["Title"]</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            font-weight: 700;
+        }
+        
+        .header .subtitle {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            padding: 30px;
+        }
+        
+        @@media (max-width: 968px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .radar-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .radar-image-container {
+            position: relative;
+            width: 100%;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+            aspect-ratio: 16/9;
+        }
+        
+        .radar-image {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 1.2em;
+        }
+        
+        .frame-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        
+        .frame-btn {
+            padding: 10px 20px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+            font-size: 0.9em;
+        }
+        
+        .frame-btn:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .frame-btn.active {
+            background: #667eea;
+            color: white;
+        }
+        
+        .frame-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .play-controls {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        
+        .play-btn {
+            padding: 12px 30px;
+            border: none;
+            background: #667eea;
+            color: white;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1em;
+            transition: all 0.2s;
+        }
+        
+        .play-btn:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        
+        .play-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .info-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .info-card {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .info-card h3 {
+            font-size: 0.9em;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+        }
+        
+        .info-card .value {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-top: 5px;
+        }
+        
+        .status-valid {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .status-invalid {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .status-updating {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px;
+            border-left: 4px solid #dc3545;
+            animation: fadeIn 0.3s;
+        }
+        
+        .error.retrying {
+            background: #fff3cd;
+            color: #856404;
+            border-left-color: #ffc107;
+        }
+        
+        @@keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .timestamp {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .refresh-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #28a745;
+            margin-right: 8px;
+            animation: pulse 2s infinite;
+        }
+        
+        @@keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .frame-info {
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌧️ BOM Radar Test</h1>
+            <div class="subtitle">@suburb, @state</div>
+        </div>
+        
+        <div id="error-container"></div>
+        
+        <div class="content">
+            <div class="radar-section">
+                <div class="radar-image-container">
+                    <div class="loading" id="loading">Loading radar data...</div>
+                    <img id="radar-image" class="radar-image" style="display: none;" alt="Radar image">
+                </div>
+                
+                <div class="frame-controls" id="frame-controls"></div>
+                
+                <div class="play-controls">
+                    <button class="play-btn" id="play-btn">▶ Play</button>
+                    <button class="play-btn" id="prev-btn">◀ Previous</button>
+                    <button class="play-btn" id="next-btn">Next ▶</button>
+                </div>
+                
+                <div class="frame-info" id="frame-info"></div>
+            </div>
+            
+            <div class="info-section">
+                <div class="info-card">
+                    <h3>Cache Status</h3>
+                    <div class="value" id="cache-status">Checking...</div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Observation Time</h3>
+                    <div class="value" id="observation-time">-</div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Cache Expires</h3>
+                    <div class="value" id="cache-expires">-</div>
+                    <div class="timestamp" id="cache-expires-relative"></div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Next Update</h3>
+                    <div class="value" id="next-update">-</div>
+                    <div class="timestamp" id="next-update-relative"></div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Weather Station</h3>
+                    <div class="value" id="weather-station">-</div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Distance</h3>
+                    <div class="value" id="distance">-</div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Update Status</h3>
+                    <div class="value" id="update-status">-</div>
+                    <div class="timestamp" id="update-status-detail"></div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Auto Refresh</h3>
+                    <div class="value">
+                        <span class="refresh-indicator" id="refresh-indicator"></span>
+                        <span id="refresh-status">Active</span>
+                    </div>
+                    <div class="timestamp" id="last-refresh"></div>
+                    <div class="timestamp" id="next-client-check"></div>
+                </div>
+                
+                <div class="info-card">
+                    <h3>Settings</h3>
+                    <button class="play-btn" id="settings-btn" style="width: 100%; margin-top: 10px;">⚙️ Settings</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Settings Modal -->
+    <div id="settings-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: white; border-radius: 12px; padding: 30px; max-width: 500px; width: 90%; max-height: 90vh; overflow-y: auto;">
+            <h2 style="margin-bottom: 20px; color: #667eea;">Settings</h2>
+            
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Frame Interval (seconds)</label>
+                <input type="number" id="frame-interval-input" min="0.5" max="10" step="0.5" style="width: 100%; padding: 10px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
+                <div class="timestamp" style="margin-top: 5px;">Time between frames in slideshow</div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; font-weight: 600; color: #333;">Auto Refresh Interval (seconds)</label>
+                <input type="number" id="refresh-interval-input" min="10" max="300" step="10" style="width: 100%; padding: 10px; border: 2px solid #667eea; border-radius: 8px; font-size: 1em;">
+                <div class="timestamp" style="margin-top: 5px;">How often to check for new radar data</div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <label style="display: flex; align-items: center; cursor: pointer;">
+                    <input type="checkbox" id="auto-play-input" style="width: 20px; height: 20px; margin-right: 10px; cursor: pointer;">
+                    <span style="font-weight: 600; color: #333;">Auto-play on page load</span>
+                </label>
+            </div>
+            
+            <div style="display: flex; gap: 10px; margin-top: 30px;">
+                <button class="play-btn" id="save-settings-btn" style="flex: 1;">Save</button>
+                <button class="play-btn" id="cancel-settings-btn" style="flex: 1; background: #6c757d;">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '@apiBaseUrl';
+        let currentFrameIndex = 0;
+        let frames = [];
+        let radarData = null;
+        let playInterval = null;
+        let isPlaying = false;
+        let lastRefreshTime = null;
+        let refreshInterval = null;
+        let nextClientCheckTime = null;
+        let retryInterval = null;
+        let isApiDown = false;
+        let retryAttempts = 0;
+        const MAX_RETRY_ATTEMPTS = 10;
+        const RETRY_DELAY_MS = 5000; // 5 seconds between retries
+        
+        // Settings with defaults
+        let settings = {
+            frameInterval: 2.0,      // seconds between frames
+            refreshInterval: 30,     // seconds between API refreshes
+            autoPlay: true           // auto-play on load
+        };
+        
+        // Cookie management
+        function setCookie(name, value, days = 365) {
+            const expires = new Date();
+            expires.setTime(expires.getTime() + (days * 24 * 60 * 60 * 1000));
+            document.cookie = `${name}=${encodeURIComponent(JSON.stringify(value))};expires=${expires.toUTCString()};path=/`;
+        }
+        
+        function getCookie(name) {
+            const nameEQ = name + "=";
+            const ca = document.cookie.split(';');
+            for (let i = 0; i < ca.length; i++) {
+                let c = ca[i];
+                while (c.charAt(0) === ' ') c = c.substring(1, c.length);
+                if (c.indexOf(nameEQ) === 0) {
+                    try {
+                        return JSON.parse(decodeURIComponent(c.substring(nameEQ.length, c.length)));
+                    } catch (e) {
+                        return null;
+                    }
+                }
+            }
+            return null;
+        }
+        
+        function loadSettings() {
+            const saved = getCookie('radarTestSettings');
+            if (saved) {
+                settings = { ...settings, ...saved };
+            }
+            updateSettingsUI();
+        }
+        
+        function saveSettings() {
+            setCookie('radarTestSettings', settings);
+            updateSettingsUI();
+            applySettings();
+        }
+        
+        function updateSettingsUI() {
+            document.getElementById('frame-interval-input').value = settings.frameInterval;
+            document.getElementById('refresh-interval-input').value = settings.refreshInterval;
+            document.getElementById('auto-play-input').checked = settings.autoPlay;
+        }
+        
+        function applySettings() {
+            // Restart play interval if playing
+            if (isPlaying) {
+                pause();
+                play();
+            }
+            
+            // Restart refresh interval
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+            refreshInterval = setInterval(refreshData, settings.refreshInterval * 1000);
+        }
+        
+        // Format date for display
+        function formatDate(dateString) {
+            if (!dateString) return '-';
+            const date = new Date(dateString);
+            return date.toLocaleString('en-AU', {
+                timeZone: 'Australia/Brisbane',
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+        
+        // Calculate relative time
+        function getRelativeTime(dateString) {
+            if (!dateString) return '';
+            const date = new Date(dateString);
+            const now = new Date();
+            const diffMs = date - now;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffSecs = Math.floor((diffMs % 60000) / 1000);
+            
+            if (diffMs < 0) {
+                return Math.abs(diffMins) + ' minute(s) ago';
+            } else if (diffMins > 0) {
+                return 'in ' + diffMins + ' minute(s)';
+            } else {
+                return 'in ' + diffSecs + ' second(s)';
+            }
+        }
+        
+        // Update relative times periodically
+        function updateRelativeTimes() {
+            if (radarData) {
+                const expiresEl = document.getElementById('cache-expires-relative');
+                const nextUpdateEl = document.getElementById('next-update-relative');
+                const updateStatusDetailEl = document.getElementById('update-status-detail');
+                const nextCheckEl = document.getElementById('next-client-check');
+                
+                if (radarData.cacheExpiresAt && expiresEl) {
+                    expiresEl.textContent = getRelativeTime(radarData.cacheExpiresAt);
+                }
+                
+                if (radarData.nextUpdateTime && nextUpdateEl) {
+                    nextUpdateEl.textContent = getRelativeTime(radarData.nextUpdateTime);
+                }
+                
+                // Update update status detail with relative time
+                if (radarData.isUpdating && radarData.nextUpdateTime && updateStatusDetailEl) {
+                    updateStatusDetailEl.textContent = 'Estimated completion: ' + formatDate(radarData.nextUpdateTime) + ' (' + getRelativeTime(radarData.nextUpdateTime) + ')';
+                } else if (!radarData.cacheIsValid && !radarData.isUpdating && radarData.nextUpdateTime && updateStatusDetailEl) {
+                    updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(radarData.nextUpdateTime) + ' (' + getRelativeTime(radarData.nextUpdateTime) + ')';
+                }
+                
+                // Update next client check time
+                if (nextClientCheckTime && nextCheckEl) {
+                    nextCheckEl.textContent = 'Next check: ' + formatDate(nextClientCheckTime.toISOString()) + ' (' + getRelativeTime(nextClientCheckTime.toISOString()) + ')';
+                }
+            }
+        }
+        
+        // Fetch radar data
+        async function fetchRadarData() {
+            try {
+                const response = await fetch(API_BASE, {
+                    signal: AbortSignal.timeout(10000) // 10 second timeout
+                });
+                
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+                    throw new Error(error.error || 'Failed to fetch radar data');
+                }
+                
+                const data = await response.json();
+                lastRefreshTime = new Date();
+                
+                // API is working - reset retry state
+                if (isApiDown) {
+                    isApiDown = false;
+                    retryAttempts = 0;
+                    clearError();
+                    if (retryInterval) {
+                        clearInterval(retryInterval);
+                        retryInterval = null;
+                    }
+                    updateApiStatus('connected');
+                }
+                
+                return data;
+            } catch (error) {
+                console.error('Error fetching radar data:', error);
+                
+                // Check if it's a network error (API down)
+                const isNetworkError = error.name === 'TypeError' || 
+                                      error.name === 'AbortError' || 
+                                      error.message.includes('fetch') ||
+                                      error.message.includes('network') ||
+                                      error.message.includes('Failed to fetch');
+                
+                if (isNetworkError) {
+                    handleApiDown(error);
+                } else {
+                    showError(error.message);
+                }
+                
+                return null;
+            }
+        }
+        
+        // Handle API being down
+        function handleApiDown(error) {
+            if (!isApiDown) {
+                isApiDown = true;
+                retryAttempts = 0;
+                updateApiStatus('disconnected');
+            }
+            
+            retryAttempts++;
+            showError(`API connection lost. Retrying... (Attempt ${retryAttempts}/${MAX_RETRY_ATTEMPTS})`);
+            
+            // Stop auto-refresh while retrying
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+            
+            // Start retry mechanism
+            if (!retryInterval && retryAttempts < MAX_RETRY_ATTEMPTS) {
+                retryInterval = setInterval(async () => {
+                    if (retryAttempts >= MAX_RETRY_ATTEMPTS) {
+                        clearInterval(retryInterval);
+                        retryInterval = null;
+                        showError('API connection failed after multiple attempts. Please check if the service is running.');
+                        updateApiStatus('failed');
+                        return;
+                    }
+                    
+                    retryAttempts++;
+                    showError(`API connection lost. Retrying... (Attempt ${retryAttempts}/${MAX_RETRY_ATTEMPTS})`);
+                    
+                    // Try to fetch data
+                    const data = await fetchRadarData();
+                    if (data) {
+                        // Success - updateUI will be called
+                        updateUI(data);
+                    }
+                }, RETRY_DELAY_MS);
+            } else if (retryAttempts >= MAX_RETRY_ATTEMPTS) {
+                showError('API connection failed after multiple attempts. Please check if the service is running.');
+                updateApiStatus('failed');
+            }
+        }
+        
+        // Update API connection status indicator
+        function updateApiStatus(status) {
+            const refreshStatusEl = document.getElementById('refresh-status');
+            const refreshIndicatorEl = document.getElementById('refresh-indicator');
+            
+            if (status === 'connected') {
+                refreshStatusEl.textContent = 'Active';
+                refreshIndicatorEl.style.background = '#28a745';
+                refreshIndicatorEl.style.animation = 'pulse 2s infinite';
+            } else if (status === 'disconnected') {
+                refreshStatusEl.textContent = 'Reconnecting...';
+                refreshIndicatorEl.style.background = '#ffc107';
+                refreshIndicatorEl.style.animation = 'pulse 1s infinite';
+            } else if (status === 'failed') {
+                refreshStatusEl.textContent = 'Connection Failed';
+                refreshIndicatorEl.style.background = '#dc3545';
+                refreshIndicatorEl.style.animation = 'none';
+            }
+        }
+        
+        // Show error message
+        function showError(message) {
+            const container = document.getElementById('error-container');
+            const isRetrying = message.includes('Retrying');
+            const errorClass = isRetrying ? 'error retrying' : 'error';
+            container.innerHTML = `<div class="${errorClass}">${isRetrying ? '⚠️ ' : '❌ Error: '}${message}</div>`;
+        }
+        
+        // Clear error message
+        function clearError() {
+            document.getElementById('error-container').innerHTML = '';
+        }
+        
+        // Update UI with radar data
+        function updateUI(data) {
+            if (!data || !data.frames || data.frames.length === 0) {
+                showError('No radar frames available');
+                return;
+            }
+            
+            radarData = data;
+            frames = data.frames.sort((a, b) => a.frameIndex - b.frameIndex);
+            
+            // Update cache status
+            const statusEl = document.getElementById('cache-status');
+            let statusHtml = '';
+            if (data.isUpdating) {
+                statusHtml = 'Updating <span class="status-badge status-updating">IN PROGRESS</span>';
+            } else if (data.cacheIsValid) {
+                statusHtml = 'Valid <span class="status-badge status-valid">ACTIVE</span>';
+            } else {
+                statusHtml = 'Invalid <span class="status-badge status-invalid">EXPIRED</span>';
+            }
+            statusEl.innerHTML = statusHtml;
+            
+            // Update update status card
+            const updateStatusEl = document.getElementById('update-status');
+            const updateStatusDetailEl = document.getElementById('update-status-detail');
+            if (data.isUpdating) {
+                updateStatusEl.innerHTML = 'Cache Update <span class="status-badge status-updating">IN PROGRESS</span>';
+                if (data.nextUpdateTime) {
+                    updateStatusDetailEl.textContent = 'Estimated completion: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
+                } else {
+                    updateStatusDetailEl.textContent = 'Update in progress, please wait...';
+                }
+            } else if (data.cacheIsValid) {
+                updateStatusEl.innerHTML = 'Cache <span class="status-badge status-valid">UP TO DATE</span>';
+                updateStatusDetailEl.textContent = 'No update needed';
+            } else {
+                updateStatusEl.innerHTML = 'Cache <span class="status-badge status-invalid">STALE</span>';
+                if (data.nextUpdateTime) {
+                    updateStatusDetailEl.textContent = 'Update scheduled: ' + formatDate(data.nextUpdateTime) + ' (' + getRelativeTime(data.nextUpdateTime) + ')';
+                } else {
+                    updateStatusDetailEl.textContent = 'Update will be triggered by background service';
+                }
+            }
+            
+            // Update observation time
+            document.getElementById('observation-time').textContent = formatDate(data.observationTime);
+            
+            // Update cache expires
+            document.getElementById('cache-expires').textContent = formatDate(data.cacheExpiresAt);
+            
+            // Update next update
+            document.getElementById('next-update').textContent = formatDate(data.nextUpdateTime);
+            
+            // Update weather station
+            document.getElementById('weather-station').textContent = data.weatherStation || '-';
+            
+            // Update distance
+            document.getElementById('distance').textContent = data.distance || '-';
+            
+            // Update last refresh
+            if (lastRefreshTime) {
+                document.getElementById('last-refresh').textContent = 
+                    'Last checked: ' + formatDate(lastRefreshTime.toISOString());
+                
+                // Calculate and display next client check time
+                nextClientCheckTime = new Date(lastRefreshTime.getTime() + (settings.refreshInterval * 1000));
+                const nextCheckEl = document.getElementById('next-client-check');
+                if (nextCheckEl) {
+                    nextCheckEl.textContent = 'Next check: ' + formatDate(nextClientCheckTime.toISOString()) + ' (' + getRelativeTime(nextClientCheckTime.toISOString()) + ')';
+                }
+            }
+            
+            // Build frame controls
+            const controlsEl = document.getElementById('frame-controls');
+            controlsEl.innerHTML = frames.map((frame, idx) => `
+                <button class="frame-btn" data-frame="${idx}" onclick="showFrame(${idx})">
+                    Frame ${frame.frameIndex} (${frame.minutesAgo}m ago)
+                </button>
+            `).join('');
+            
+            // Show first frame
+            if (frames.length > 0) {
+                showFrame(0);
+                
+                // Auto-play if enabled and not already playing
+                if (settings.autoPlay && !isPlaying) {
+                    setTimeout(() => play(), 500);
+                }
+            }
+            
+            updateRelativeTimes();
+        }
+        
+        // Show specific frame
+        function showFrame(index) {
+            if (index < 0 || index >= frames.length) return;
+            
+            currentFrameIndex = index;
+            const frame = frames[index];
+            
+            // Update image
+            const imgEl = document.getElementById('radar-image');
+            const loadingEl = document.getElementById('loading');
+            
+            imgEl.onload = () => {
+                loadingEl.style.display = 'none';
+                imgEl.style.display = 'block';
+            };
+            
+            imgEl.src = frame.imageUrl;
+            imgEl.alt = `Radar frame ${frame.frameIndex} (${frame.minutesAgo} minutes ago)`;
+            
+            // Update frame info
+            document.getElementById('frame-info').textContent = 
+                `Frame ${frame.frameIndex} of ${frames.length - 1} • ${frame.minutesAgo} minutes ago`;
+            
+            // Update active button
+            document.querySelectorAll('.frame-btn').forEach((btn, idx) => {
+                btn.classList.toggle('active', idx === index);
+            });
+        }
+        
+        // Play/pause slideshow
+        function togglePlay() {
+            if (isPlaying) {
+                pause();
+            } else {
+                play();
+            }
+        }
+        
+        function play() {
+            if (frames.length === 0) return;
+            
+            isPlaying = true;
+            document.getElementById('play-btn').textContent = '⏸ Pause';
+            
+            if (playInterval) {
+                clearInterval(playInterval);
+            }
+            
+            playInterval = setInterval(() => {
+                currentFrameIndex = (currentFrameIndex + 1) % frames.length;
+                showFrame(currentFrameIndex);
+            }, settings.frameInterval * 1000);
+        }
+        
+        function pause() {
+            isPlaying = false;
+            document.getElementById('play-btn').textContent = '▶ Play';
+            
+            if (playInterval) {
+                clearInterval(playInterval);
+                playInterval = null;
+            }
+        }
+        
+        // Previous/Next frame
+        function previousFrame() {
+            pause();
+            const newIndex = currentFrameIndex > 0 ? currentFrameIndex - 1 : frames.length - 1;
+            showFrame(newIndex);
+        }
+        
+        function nextFrame() {
+            pause();
+            const newIndex = (currentFrameIndex + 1) % frames.length;
+            showFrame(newIndex);
+        }
+        
+        // Auto-refresh data
+        async function refreshData() {
+            // Don't clear error if API is down (keep retry message visible)
+            if (!isApiDown) {
+                clearError();
+            }
+            
+            const data = await fetchRadarData();
+            if (data) {
+                updateUI(data);
+                
+                // Restart auto-refresh if it was stopped
+                if (!refreshInterval && !isApiDown) {
+                    refreshInterval = setInterval(refreshData, settings.refreshInterval * 1000);
+                }
+            }
+        }
+        
+        // Settings modal management
+        function showSettings() {
+            document.getElementById('settings-modal').style.display = 'flex';
+        }
+        
+        function hideSettings() {
+            document.getElementById('settings-modal').style.display = 'none';
+        }
+        
+        // Initialize
+        async function init() {
+            // Load settings from cookies
+            loadSettings();
+            
+            // Set up event listeners
+            document.getElementById('play-btn').addEventListener('click', togglePlay);
+            document.getElementById('prev-btn').addEventListener('click', previousFrame);
+            document.getElementById('next-btn').addEventListener('click', nextFrame);
+            document.getElementById('settings-btn').addEventListener('click', showSettings);
+            document.getElementById('save-settings-btn').addEventListener('click', () => {
+                settings.frameInterval = parseFloat(document.getElementById('frame-interval-input').value) || 2.0;
+                settings.refreshInterval = parseInt(document.getElementById('refresh-interval-input').value) || 30;
+                settings.autoPlay = document.getElementById('auto-play-input').checked;
+                saveSettings();
+                hideSettings();
+            });
+            document.getElementById('cancel-settings-btn').addEventListener('click', () => {
+                updateSettingsUI(); // Reset to current settings
+                hideSettings();
+            });
+            
+            // Close modal on background click
+            document.getElementById('settings-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'settings-modal') {
+                    hideSettings();
+                }
+            });
+            
+            // Initial load
+            await refreshData();
+            
+            // Auto-refresh based on settings (only if API is up)
+            if (!isApiDown) {
+                refreshInterval = setInterval(refreshData, settings.refreshInterval * 1000);
+            }
+            
+            // Update relative times every second
+            setInterval(updateRelativeTimes, 1000);
+            
+            // Auto-play if enabled
+            if (settings.autoPlay && frames.length > 0) {
+                setTimeout(() => play(), 1000); // Small delay to ensure frames are loaded
+            }
+        }
+        
+        // Start when page loads
+        init();
+    </script>
+</body>
+</html>
+

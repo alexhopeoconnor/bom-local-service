@@ -147,11 +147,16 @@ public class CacheManagementService : BackgroundService
                     suburb, state, status.CacheExpiresAt);
                 return (true, false);
             }
-            else
+            else if (status.CacheIsValid)
             {
                 _logger.LogInformation("Cache is valid for {Suburb}, {State} (expires at {ExpiresAt})", 
-                    suburb, state, status.CacheExpiresAt);
+                    suburb, state, status.CacheExpiresAt?.ToString("yyyy-MM-dd HH:mm:ss UTC") ?? "unknown");
                 return (false, true);
+            }
+            else
+            {
+                _logger.LogInformation("Cache exists but is invalid for {Suburb}, {State}", suburb, state);
+                return (false, false);
             }
         }
         catch (Exception ex)

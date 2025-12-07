@@ -541,7 +541,9 @@ public class ScrapingService : IScrapingService
             }
 
             // Step 22: Return response with all frames
-            return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, lastUpdatedInfo, suburb, state);
+            // Note: ScrapingService doesn't have access to cache management check interval
+            // Default to 5 minutes (standard check interval)
+            return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, lastUpdatedInfo, suburb, state, cacheIsValid: true, cacheExpiresAt: null, isUpdating: false, cacheManagementCheckIntervalMinutes: 5);
         }
         catch (Exception ex)
         {

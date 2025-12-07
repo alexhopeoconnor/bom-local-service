@@ -14,6 +14,7 @@ public class BomRadarService : IBomRadarService, IDisposable
     private readonly IScrapingService _scrapingService;
     private readonly IDebugService _debugService;
     private readonly double _cacheExpirationMinutes;
+    private readonly int _cacheManagementCheckIntervalMinutes;
     private readonly ConcurrentDictionary<string, string> _activeCacheFolders = new(); // locationKey -> cacheFolderPath
 
     public BomRadarService(
@@ -30,6 +31,7 @@ public class BomRadarService : IBomRadarService, IDisposable
         _scrapingService = scrapingService;
         _debugService = debugService;
         _cacheExpirationMinutes = configuration.GetValue<double>("CacheExpirationMinutes", 15.5);
+        _cacheManagementCheckIntervalMinutes = configuration.GetValue<int>("CacheManagement:CheckIntervalMinutes", 5);
     }
 
     public async Task<RadarResponse?> GetCachedRadarAsync(string suburb, string state, CancellationToken cancellationToken = default)
@@ -54,7 +56,7 @@ public class BomRadarService : IBomRadarService, IDisposable
         var cacheExpiresAt = cachedMetadata != null ? cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes) : (DateTime?)null;
         var isUpdating = _activeCacheFolders.ContainsKey(locationKey);
         
-        return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating);
+        return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating, _cacheManagementCheckIntervalMinutes);
     }
     
     public async Task<List<RadarFrame>?> GetCachedFramesAsync(string suburb, string state, CancellationToken cancellationToken = default)
@@ -95,6 +97,10 @@ public class BomRadarService : IBomRadarService, IDisposable
                 status.CacheIsValid = _cacheService.IsCacheValid(cachedMetadata);
                 status.CacheExpiresAt = cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes);
             }
+            else
+            {
+                status.CacheIsValid = false;
+            }
             
             status.UpdateTriggered = false;
             status.Message = "Cache update already in progress";
@@ -108,6 +114,11 @@ public class BomRadarService : IBomRadarService, IDisposable
         {
             status.CacheIsValid = _cacheService.IsCacheValid(cachedMetadata);
             status.CacheExpiresAt = cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes);
+        }
+        else
+        {
+            // If no metadata, cache cannot be valid
+            status.CacheIsValid = false;
         }
 
         // Check if we need to update
@@ -172,7 +183,7 @@ public class BomRadarService : IBomRadarService, IDisposable
                 var frames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
                 var isValid = cachedMetadata != null && _cacheService.IsCacheValid(cachedMetadata);
                 var cacheExpiresAt = cachedMetadata != null ? cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes) : (DateTime?)null;
-                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: true);
+                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: true, _cacheManagementCheckIntervalMinutes);
             }
             else
             {
@@ -189,7 +200,7 @@ public class BomRadarService : IBomRadarService, IDisposable
                 _logger.LogInformation("Returning valid cached screenshots for {Suburb}, {State} (no semaphore needed)", suburb, state);
                 var frames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
                 var cacheExpiresAt = cachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes);
-                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: false);
+                return ResponseBuilder.CreateRadarResponse(cacheFolderPath, frames, cachedMetadata, suburb, state, isValid, cacheExpiresAt, isUpdating: false, _cacheManagementCheckIntervalMinutes);
             }
             else
             {
@@ -257,7 +268,7 @@ public class BomRadarService : IBomRadarService, IDisposable
                 _logger.LogInformation("Cache became valid while waiting for semaphore, returning cached screenshots");
                 var recheckFrames = await _cacheService.GetCachedFramesAsync(suburb, state, cancellationToken);
                 var recheckCacheExpiresAt = recheckCachedMetadata.ObservationTime.AddMinutes(_cacheExpirationMinutes);
-                return ResponseBuilder.CreateRadarResponse(recheckCacheFolderPath, recheckFrames, recheckCachedMetadata, suburb, state, cacheIsValid: true, recheckCacheExpiresAt, isUpdating: false);
+                return ResponseBuilder.CreateRadarResponse(recheckCacheFolderPath, recheckFrames, recheckCachedMetadata, suburb, state, cacheIsValid: true, recheckCacheExpiresAt, isUpdating: false, _cacheManagementCheckIntervalMinutes);
             }
             
             // Create debug folder only now

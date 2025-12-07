@@ -4,7 +4,8 @@ using BomLocalService.Services.Interfaces;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container
-builder.Services.AddControllers();
+// AddControllersWithViews includes AddControllers, so we use it for both MVC and API controllers
+builder.Services.AddControllersWithViews();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
 
@@ -45,6 +46,13 @@ if (enableHttpsRedirection)
 }
 
 // No authorization required - service is designed to run behind a reverse proxy if auth is needed
+
+// Map MVC routes first (before API routes to avoid conflicts)
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=RadarTest}/{action=Index}/{suburb?}/{state?}");
+
+// Map API controllers (with /api prefix)
 app.MapControllers();
 
 // Cleanup incomplete cache folders from previous crashes/restarts before starting services
