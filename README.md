@@ -46,7 +46,27 @@ Built on ASP.NET Core 9.0, the service uses a service-oriented architecture with
 - **CacheController**: REST endpoints for cache management operations (`/api/cache/{suburb}/{state}`)
 - **RadarTestController**: MVC controller serving the demo SPA at `/radar/{suburb}/{state}`
 
-## Building with Docker
+## Installation
+
+### Docker Image
+
+Pre-built Docker images are available on GitHub Container Registry:
+
+**Image:** `ghcr.io/alexhopeoconnor/bom-local-service`
+
+**Multi-architecture support:** Images are built for both `linux/amd64` and `linux/arm64` platforms
+
+**Pull the latest version:**
+```bash
+docker pull ghcr.io/alexhopeoconnor/bom-local-service:latest
+```
+
+**Pull a specific version:**
+```bash
+docker pull ghcr.io/alexhopeoconnor/bom-local-service:v0.0.1
+```
+
+See all available versions on the [releases page](https://github.com/alexhopeoconnor/bom-local-service/releases).
 
 ### Prerequisites
 
@@ -55,9 +75,34 @@ Built on ASP.NET Core 9.0, the service uses a service-oriented architecture with
 
 ### Quick Start
 
+#### Option 1: Using Pre-built Docker Image (Recommended)
+
+Pull the latest image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/alexhopeoconnor/bom-local-service:latest
+```
+
+Then run the container:
+```bash
+docker run -d \
+  --name bom-local-service \
+  -p 8082:8080 \
+  -v $(pwd)/cache:/app/cache \
+  --shm-size=1gb \
+  --ipc=host \
+  ghcr.io/alexhopeoconnor/bom-local-service:latest
+```
+
+**Available tags:**
+- `latest` - Latest release
+- `v0.0.1` - Specific version (see [releases](https://github.com/alexhopeoconnor/bom-local-service/releases) for all versions)
+
+#### Option 2: Build from Source
+
 1. **Clone the repository**:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/alexhopeoconnor/bom-local-service.git
    cd bom-local-service
    ```
 
@@ -86,14 +131,32 @@ Built on ASP.NET Core 9.0, the service uses a service-oriented architecture with
 
 ### Using Docker Compose
 
-The included `docker-compose.yml` provides a convenient way to run the service with all configuration options:
+The included `docker-compose.yml` provides a convenient way to run the service with all configuration options.
 
+**Using pre-built image (recommended):**
+
+Update `docker-compose.yml` to use the GitHub Container Registry image:
+```yaml
+services:
+  bom-local-service:
+    image: ghcr.io/alexhopeoconnor/bom-local-service:latest
+    # Remove or comment out the 'build:' section
+```
+
+Then run:
+```bash
+docker-compose up -d
+```
+
+**Building from source:**
+
+If you want to build locally, keep the `build:` section in `docker-compose.yml` and run:
 ```bash
 docker-compose up -d
 ```
 
 This will:
-- Build the image if it doesn't exist
+- Pull/build the image as configured
 - Start the service on port 8082 (configurable via `HOST_PORT`)
 - Mount the `./cache` directory for persistent storage
 - Apply all environment variable configurations
@@ -180,7 +243,7 @@ docker run -d \
   -e CACHEEXPIRATIONMINUTES=15 \
   --shm-size=1gb \
   --ipc=host \
-  bom-local-service
+  ghcr.io/alexhopeoconnor/bom-local-service:latest
 ```
 
 #### Custom Cache Directory
@@ -193,7 +256,7 @@ docker run -d \
   -e CACHEDIRECTORY=/app/cache \
   --shm-size=1gb \
   --ipc=host \
-  bom-local-service
+  ghcr.io/alexhopeoconnor/bom-local-service:latest
 ```
 
 #### Development Mode with Debug
@@ -208,7 +271,7 @@ docker run -d \
   -e DEBUG__WAITMS=5000 \
   --shm-size=1gb \
   --ipc=host \
-  bom-local-service
+  ghcr.io/alexhopeoconnor/bom-local-service:latest
 ```
 
 #### Using docker-compose with Custom Settings
