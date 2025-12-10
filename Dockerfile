@@ -34,12 +34,9 @@ COPY --from=publish /app/publish .
 # Create cache directory for screenshots
 RUN mkdir -p /app/cache && chmod 777 /app/cache
 
-# Create startup script to run Xvfb and then the app
-RUN echo '#!/bin/bash\n\
-Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &\n\
-export DISPLAY=:99\n\
-exec dotnet BomLocalService.dll' > /app/start.sh && \
-    chmod +x /app/start.sh
+# Copy startup script
+COPY scripts/docker-start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
 # OCI labels for GitHub Container Registry metadata
 LABEL org.opencontainers.image.source="https://github.com/alexhopeoconnor/bom-local-service"
