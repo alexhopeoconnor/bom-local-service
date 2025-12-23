@@ -78,7 +78,7 @@ public class CaptureFramesStep : BaseScrapingStep
             
             var frames = new List<RadarFrame>();
             var stepForwardButton = SelectorService.GetLocator(context.Page, Selectors.StepForwardButton);
-            int? previousMinutesAgo = null;
+            DateTime? previousTimestamp = null;
             
             for (int frameIndex = 0; frameIndex < frameCount; frameIndex++)
             {
@@ -90,35 +90,46 @@ public class CaptureFramesStep : BaseScrapingStep
                 // This is especially important for frame 0 which was just selected in ResetToFirstFrame
                 await context.Page.WaitForTimeoutAsync(300);
                 
-                // Try extracting with a retry in case the label is still updating
-                var minutesAgo = await ExtractMinutesAgoFromDisplayAsync(context.Page);
-                if (minutesAgo == null)
+                // Try extracting timestamp with a retry in case the label is still updating
+                var frameTimestamp = await ExtractTimestampFromDisplayAsync(context.Page);
+                if (frameTimestamp == null)
                 {
                     // Retry once after a short wait in case label was updating
                     await context.Page.WaitForTimeoutAsync(200);
-                    minutesAgo = await ExtractMinutesAgoFromDisplayAsync(context.Page);
-                }
-                if (minutesAgo == null && context.FrameInfo != null && frameIndex < context.FrameInfo.Count)
-                {
-                    var (_, defaultMinutesAgo) = context.FrameInfo[frameIndex];
-                    minutesAgo = defaultMinutesAgo;
-                    Logger.LogWarning("Step {Step}: Failed to extract minutes from display label for frame {FrameIndex}, using default: {MinutesAgo}", Name, frameIndex, minutesAgo);
+                    frameTimestamp = await ExtractTimestampFromDisplayAsync(context.Page);
                 }
                 
-                if (frameIndex > 0 && previousMinutesAgo.HasValue && minutesAgo == previousMinutesAgo.Value)
+                // Fallback: calculate expected timestamp from observation time and frame index if we can't parse it
+                if (frameTimestamp == null && context.LastUpdatedInfo?.ObservationTime != null && context.FrameInfo != null && frameIndex < context.FrameInfo.Count)
                 {
-                    Logger.LogWarning("Step {Step}: Frame {FrameIndex} has same minutesAgo ({MinutesAgo}) as previous frame. Waiting for display to update...", Name, frameIndex, minutesAgo);
-                    await WaitForDisplayLabelToChangeAsync(context.Page, previousMinutesAgo.Value);
-                    minutesAgo = await ExtractMinutesAgoFromDisplayAsync(context.Page);
-                    if (minutesAgo == null || minutesAgo == previousMinutesAgo.Value)
+                    var (_, defaultMinutesAgo) = context.FrameInfo[frameIndex];
+                    frameTimestamp = context.LastUpdatedInfo.ObservationTime.AddMinutes(-defaultMinutesAgo);
+                    Logger.LogWarning("Step {Step}: Failed to extract timestamp from display label for frame {FrameIndex}, calculated from observation time: {Timestamp}", 
+                        Name, frameIndex, frameTimestamp);
+                }
+                
+                if (frameIndex > 0 && previousTimestamp.HasValue && frameTimestamp == previousTimestamp.Value)
+                {
+                    Logger.LogWarning("Step {Step}: Frame {FrameIndex} has same timestamp ({Timestamp}) as previous frame. Waiting for display to update...", 
+                        Name, frameIndex, frameTimestamp);
+                    await WaitForDisplayLabelToChangeAsync(context.Page, previousTimestamp.Value);
+                    frameTimestamp = await ExtractTimestampFromDisplayAsync(context.Page);
+                    if (frameTimestamp == null || frameTimestamp == previousTimestamp.Value)
                     {
-                        if (context.FrameInfo != null && frameIndex < context.FrameInfo.Count)
+                        if (context.LastUpdatedInfo?.ObservationTime != null && context.FrameInfo != null && frameIndex < context.FrameInfo.Count)
                         {
                             var (_, defaultMinutesAgo) = context.FrameInfo[frameIndex];
-                            minutesAgo = defaultMinutesAgo;
-                            Logger.LogWarning("Step {Step}: Display label did not update for frame {FrameIndex}, using calculated default: {MinutesAgo}", Name, frameIndex, minutesAgo);
+                            frameTimestamp = context.LastUpdatedInfo.ObservationTime.AddMinutes(-defaultMinutesAgo);
+                            Logger.LogWarning("Step {Step}: Display label did not update for frame {FrameIndex}, calculated from observation time: {Timestamp}", 
+                                Name, frameIndex, frameTimestamp);
                         }
                     }
+                }
+                
+                if (frameTimestamp == null)
+                {
+                    Logger.LogError("Step {Step}: Could not determine timestamp for frame {FrameIndex}, skipping", Name, frameIndex);
+                    continue;
                 }
                 
                 var radarFolder = FilePathHelper.GetDataTypeFolderPath(context.CacheFolderPath, CachedDataType.Radar);
@@ -134,13 +145,13 @@ public class CaptureFramesStep : BaseScrapingStep
                 {
                     FrameIndex = frameIndex,
                     ImagePath = framePath,
-                    MinutesAgo = minutesAgo ?? 0
+                    AbsoluteObservationTime = frameTimestamp.Value
                 });
                 
-                previousMinutesAgo = minutesAgo;
+                previousTimestamp = frameTimestamp;
                 
-                Logger.LogInformation("Step {Step}: Frame {FrameIndex} saved: {Path} ({MinutesAgo} minutes ago)", 
-                    Name, frameIndex, framePath, minutesAgo ?? 0);
+                Logger.LogInformation("Step {Step}: Frame {FrameIndex} saved: {Path} (timestamp: {Timestamp} UTC)", 
+                    Name, frameIndex, framePath, frameTimestamp.Value);
                 
                 _cacheService.RecordUpdateProgressByFolder(context.CacheFolderPath, CacheUpdatePhase.CapturingFrames, frameIndex + 1, frameCount);
                 
@@ -150,13 +161,13 @@ public class CaptureFramesStep : BaseScrapingStep
                 {
                     await DismissModalOverlaysAsync(context.Page);
                     
-                    var currentMinutesAgo = await ExtractMinutesAgoFromDisplayAsync(context.Page);
+                    var currentTimestamp = await ExtractTimestampFromDisplayAsync(context.Page);
                     
                     await stepForwardButton.ClickAsync(new LocatorClickOptions { Force = true });
                     
-                    if (currentMinutesAgo.HasValue)
+                    if (currentTimestamp.HasValue)
                     {
-                        await WaitForDisplayLabelToChangeAsync(context.Page, currentMinutesAgo.Value);
+                        await WaitForDisplayLabelToChangeAsync(context.Page, currentTimestamp.Value);
                     }
                     else
                     {
@@ -187,7 +198,10 @@ public class CaptureFramesStep : BaseScrapingStep
         }
     }
     
-    private async Task<int?> ExtractMinutesAgoFromDisplayAsync(IPage page)
+    /// <summary>
+    /// Extracts the UTC timestamp from the frame display label
+    /// </summary>
+    private async Task<DateTime?> ExtractTimestampFromDisplayAsync(IPage page)
     {
         try
         {
@@ -200,7 +214,7 @@ public class CaptureFramesStep : BaseScrapingStep
             }
             
             var trimmedLabel = timeLabel.Trim();
-            Logger.LogInformation("Extracting minutes from display label: '{Label}'", trimmedLabel);
+            Logger.LogInformation("Extracting timestamp from display label: '{Label}'", trimmedLabel);
             
             // Parse timestamp format (current BOM website format): "Wednesday 17 Dec, 11:05 pm" or "17 Dec, 11:05 pm"
             Logger.LogInformation("Trying timestamp pattern: '{Pattern}'", TextPatterns.TimestampPattern);
@@ -209,19 +223,10 @@ public class CaptureFramesStep : BaseScrapingStep
             {
                 var timestampStr = timestampMatch.Groups[0].Value;
                 Logger.LogInformation("Matched timestamp pattern: '{Timestamp}' from label: '{Label}'", timestampStr, trimmedLabel);
-                if (TryParseTimestamp(timestampStr, out var timestamp))
+                if (TryParseTimestamp(timestampStr, out var frameTimestampUtc))
                 {
-                    var minutesAgo = (int)(DateTime.UtcNow - timestamp).TotalMinutes;
-                    Logger.LogInformation("Parsed timestamp: {Timestamp} UTC, calculated minutes ago: {Minutes}", timestamp, minutesAgo);
-                    if (minutesAgo >= 0 && minutesAgo <= 120) // Reasonable range: 0-2 hours
-                    {
-                        Logger.LogInformation("Successfully calculated minutes ago from timestamp: {Minutes}", minutesAgo);
-                        return minutesAgo;
-                    }
-                    else
-                    {
-                        Logger.LogWarning("Calculated minutes ago ({Minutes}) outside reasonable range (0-120)", minutesAgo);
-                    }
+                    Logger.LogInformation("Successfully parsed frame timestamp: {Timestamp} UTC", frameTimestampUtc);
+                    return frameTimestampUtc;
                 }
                 else
                 {
@@ -237,17 +242,27 @@ public class CaptureFramesStep : BaseScrapingStep
         }
         catch (Exception ex)
         {
-            Logger.LogDebug(ex, "Failed to extract minutes from display label");
+            Logger.LogDebug(ex, "Failed to extract timestamp from display label");
             return null;
         }
     }
     
-    private bool TryParseTimestamp(string timestampStr, out DateTime timestamp)
+    private bool TryParseTimestamp(string timestampStr, out DateTime timestampUtc)
     {
-        timestamp = DateTime.MinValue;
+        timestampUtc = DateTime.MinValue;
         
         try
         {
+            // Get configured timezone
+            var timezone = Configuration.GetValue<string>("Timezone");
+            if (string.IsNullOrEmpty(timezone))
+            {
+                Logger.LogWarning("Timezone not configured, cannot parse timestamp correctly");
+                return false;
+            }
+            
+            var timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(timezone);
+            
             // Try common Australian date formats
             // Format: "Wednesday 17 Dec, 11:05 pm" or "17 Dec, 11:05 pm"
             var formats = new[]
@@ -261,57 +276,68 @@ public class CaptureFramesStep : BaseScrapingStep
             };
             
             var culture = new System.Globalization.CultureInfo("en-AU");
+            DateTime localTime = default;
+            bool parsed = false;
             
             foreach (var format in formats)
             {
                 if (DateTime.TryParseExact(timestampStr, format, culture, 
-                    System.Globalization.DateTimeStyles.AssumeLocal, out timestamp))
+                    System.Globalization.DateTimeStyles.None, out localTime))
                 {
-                    // If year is not specified, assume current year
-                    if (timestamp.Year == 1)
-                    {
-                        timestamp = new DateTime(DateTime.Now.Year, timestamp.Month, timestamp.Day, 
-                            timestamp.Hour, timestamp.Minute, timestamp.Second);
-                    }
-                    
-                    // If the parsed time is in the future (likely same day next year), adjust
-                    if (timestamp > DateTime.Now && timestamp < DateTime.Now.AddDays(1))
-                    {
-                        // Already correct
-                    }
-                    else if (timestamp > DateTime.Now)
-                    {
-                        // Likely parsed as next year, adjust to this year
-                        timestamp = timestamp.AddYears(-1);
-                    }
-                    
-                    return true;
+                    parsed = true;
+                    break;
                 }
             }
             
-            return false;
+            if (!parsed)
+            {
+                return false;
+            }
+            
+            // If year is not specified, assume current year
+            if (localTime.Year == 1)
+            {
+                localTime = new DateTime(DateTime.Now.Year, localTime.Month, localTime.Day, 
+                    localTime.Hour, localTime.Minute, localTime.Second);
+            }
+            
+            // Get current time in the configured timezone to determine the date
+            var nowInTz = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, timeZoneInfo);
+            var dateTimeInTz = nowInTz.Date.Add(localTime.TimeOfDay);
+            
+            // If the time is in the future, it must be from yesterday
+            if (dateTimeInTz > nowInTz)
+            {
+                dateTimeInTz = dateTimeInTz.AddDays(-1);
+            }
+            
+            // Convert to UTC
+            timestampUtc = TimeZoneInfo.ConvertTimeToUtc(dateTimeInTz, timeZoneInfo);
+            
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Logger.LogWarning(ex, "Failed to parse timestamp: {Timestamp}", timestampStr);
             return false;
         }
     }
     
-    private async Task WaitForDisplayLabelToChangeAsync(IPage page, int currentMinutesAgo, int maxWaitMs = 5000)
+    private async Task WaitForDisplayLabelToChangeAsync(IPage page, DateTime currentTimestamp, int maxWaitMs = 5000)
     {
         try
         {
             var startTime = DateTime.UtcNow;
             while ((DateTime.UtcNow - startTime).TotalMilliseconds < maxWaitMs)
             {
-                var newMinutesAgo = await ExtractMinutesAgoFromDisplayAsync(page);
-                if (newMinutesAgo.HasValue && newMinutesAgo.Value != currentMinutesAgo)
+                var newTimestamp = await ExtractTimestampFromDisplayAsync(page);
+                if (newTimestamp.HasValue && newTimestamp.Value != currentTimestamp)
                 {
                     return;
                 }
                 await page.WaitForTimeoutAsync(200);
             }
-            Logger.LogDebug("Display label did not change from {CurrentMinutesAgo} within {MaxWaitMs}ms", currentMinutesAgo, maxWaitMs);
+            Logger.LogDebug("Display label did not change from {CurrentTimestamp} within {MaxWaitMs}ms", currentTimestamp, maxWaitMs);
         }
         catch (Exception ex)
         {

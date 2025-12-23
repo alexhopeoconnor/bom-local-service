@@ -1,3 +1,4 @@
+using BomLocalService.Services.Interfaces.Registration;
 using Microsoft.Playwright;
 
 namespace BomLocalService.Services.Interfaces;
@@ -6,7 +7,7 @@ namespace BomLocalService.Services.Interfaces;
 /// Service interface for debug file generation during web scraping operations.
 /// When enabled, saves screenshots, HTML, console logs, and network request information for troubleshooting.
 /// </summary>
-public interface IDebugService
+public interface IDebugService : ISingletonService
 {
     /// <summary>
     /// Indicates whether debug mode is enabled.

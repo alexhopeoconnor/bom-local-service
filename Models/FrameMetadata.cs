@@ -11,8 +11,9 @@ public class FrameMetadata
     public int FrameIndex { get; set; }
     
     /// <summary>
-    /// Number of minutes ago this frame represents (40, 35, 30, 25, 20, 15, 10).
+    /// The absolute UTC observation time for this frame.
+    /// Parsed directly from the frame display label during capture.
     /// </summary>
-    public int MinutesAgo { get; set; }
+    public DateTime ObservationTime { get; set; }
 }
 

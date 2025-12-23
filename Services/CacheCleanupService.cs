@@ -1,9 +1,10 @@
+using BomLocalService.Services.Interfaces.Registration;
 using BomLocalService.Utilities;
 using Microsoft.Extensions.Hosting;
 
 namespace BomLocalService.Services;
 
-public class CacheCleanupService : BackgroundService
+public class CacheCleanupService : BackgroundService, IHostedServiceRegistration
 {
     private readonly ILogger<CacheCleanupService> _logger;
     private readonly string _cacheDirectory;

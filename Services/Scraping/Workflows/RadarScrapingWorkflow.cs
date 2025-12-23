@@ -5,7 +5,7 @@ using BomLocalService.Utilities;
 
 namespace BomLocalService.Services.Scraping.Workflows;
 
-public class RadarScrapingWorkflow : IWorkflow<RadarResponse>
+public class RadarScrapingWorkflow : IRadarScrapingWorkflow
 {
     private readonly ILogger<RadarScrapingWorkflow> _logger;
     private readonly IScrapingStepRegistry _stepRegistry;

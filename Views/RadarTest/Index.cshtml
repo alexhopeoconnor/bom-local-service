@@ -1222,32 +1222,37 @@
                     });
                 });
                 
+                // Filter out frames without absoluteObservationTime (backend should have filtered these, so this catches bugs)
+                const invalidFrames = allFrames.filter((frame, idx) => !frame.absoluteObservationTime);
+                if (invalidFrames.length > 0) {
+                    console.error('Backend returned frames missing absoluteObservationTime (should have been filtered):', {
+                        count: invalidFrames.length,
+                        frames: invalidFrames.map((f, idx) => ({
+                            index: idx,
+                            frameIndex: f.frameIndex,
+                            cacheFolder: f.cacheFolderName,
+                            imageUrl: f.imageUrl
+                        }))
+                    });
+                }
+                const validFrames = allFrames.filter(frame => frame.absoluteObservationTime);
+                
                 // Validate chronological order to detect backend issues
                 let previousTime = null;
                 const outOfOrderFrames = [];
-                allFrames.forEach((frame, idx) => {
-                    if (frame.absoluteObservationTime) {
-                        const currentTime = new Date(frame.absoluteObservationTime).getTime();
-                        if (previousTime !== null && currentTime < previousTime) {
-                            outOfOrderFrames.push({
-                                index: idx,
-                                frameIndex: frame.frameIndex,
-                                cacheFolder: frame.cacheFolderName,
-                                absoluteTime: frame.absoluteObservationTime,
-                                previousTime: new Date(previousTime).toISOString(),
-                                timeDiffMinutes: (currentTime - previousTime) / 1000 / 60
-                            });
-                        }
-                        previousTime = currentTime;
-                    } else {
-                        // Missing absoluteObservationTime is also an issue
-                        console.warn(`Frame at index ${idx} missing absoluteObservationTime`, {
+                validFrames.forEach((frame, idx) => {
+                    const currentTime = new Date(frame.absoluteObservationTime).getTime();
+                    if (previousTime !== null && currentTime < previousTime) {
+                        outOfOrderFrames.push({
+                            index: idx,
                             frameIndex: frame.frameIndex,
                             cacheFolder: frame.cacheFolderName,
-                            minutesAgo: frame.minutesAgo,
-                            observationTime: frame.observationTime
+                            absoluteTime: frame.absoluteObservationTime,
+                            previousTime: new Date(previousTime).toISOString(),
+                            timeDiffMinutes: (currentTime - previousTime) / 1000 / 60
                         });
                     }
+                    previousTime = currentTime;
                 });
                 
                 if (outOfOrderFrames.length > 0) {
@@ -1256,6 +1261,10 @@
                         issues: outOfOrderFrames
                     });
                 }
+                
+                // Use only valid frames going forward
+                allFrames.length = 0;
+                allFrames.push(...validFrames);
                 
                 // Re-index frames sequentially for display
                 allFrames.forEach((frame, idx) => {
@@ -1988,10 +1997,9 @@
             // Update time display
             const timeDisplay = document.getElementById('current-frame-time');
             if (timeDisplay) {
-                if (isExtendedMode && frame.absoluteObservationTime) {
-                    timeDisplay.textContent = formatDate(frame.absoluteObservationTime);
-                } else if (frame.minutesAgo !== undefined) {
-                    timeDisplay.textContent = `${frame.minutesAgo} min ago`;
+                if (frame.absoluteObservationTime) {
+                    const minutesAgo = Math.round((Date.now() - new Date(frame.absoluteObservationTime).getTime()) / 60000);
+                    timeDisplay.textContent = `${minutesAgo} min ago`;
                 } else {
                     timeDisplay.textContent = '-';
                 }
@@ -2075,7 +2083,10 @@
                     : (frame.cacheTimestamp ? formatDate(frame.cacheTimestamp) : '');
                 altText = `Radar frame ${frameNum}${timeInfo ? ' (' + timeInfo + ')' : ''}`;
             } else {
-                altText = `Radar frame ${frame.frameIndex} (${frame.minutesAgo} minutes ago)`;
+                const minutesAgo = frame.absoluteObservationTime 
+                    ? Math.round((Date.now() - new Date(frame.absoluteObservationTime).getTime()) / 60000)
+                    : null;
+                altText = `Radar frame ${frame.frameIndex}${minutesAgo !== null ? ` (${minutesAgo} minutes ago)` : ''}`;
             }
             
             // Check if image is already loaded (from preload)
@@ -2103,8 +2114,11 @@
                 document.getElementById('frame-info').textContent = 
                     `Frame ${frameNum} of ${frames.length - 1}${timeInfo ? ' • ' + timeInfo : ''}`;
             } else {
+                const minutesAgo = frame.absoluteObservationTime 
+                    ? Math.round((Date.now() - new Date(frame.absoluteObservationTime).getTime()) / 60000)
+                    : null;
                 document.getElementById('frame-info').textContent = 
-                    `Frame ${frame.frameIndex} of ${frames.length - 1} • ${frame.minutesAgo} minutes ago`;
+                    `Frame ${frame.frameIndex} of ${frames.length - 1}${minutesAgo !== null ? ` • ${minutesAgo} minutes ago` : ''}`;
             }
         }
         

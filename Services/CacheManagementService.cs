@@ -1,10 +1,11 @@
 using BomLocalService.Services.Interfaces;
+using BomLocalService.Services.Interfaces.Registration;
 using BomLocalService.Utilities;
 using Microsoft.Extensions.Hosting;
 
 namespace BomLocalService.Services;
 
-public class CacheManagementService : BackgroundService
+public class CacheManagementService : BackgroundService, IHostedServiceRegistration
 {
     private readonly ILogger<CacheManagementService> _logger;
     private readonly IBomRadarService _bomRadarService;

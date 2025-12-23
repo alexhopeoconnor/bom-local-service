@@ -1,4 +1,5 @@
 using BomLocalService.Models;
+using BomLocalService.Services.Interfaces.Registration;
 using Microsoft.Playwright;
 
 namespace BomLocalService.Services.Interfaces;
@@ -7,7 +8,7 @@ namespace BomLocalService.Services.Interfaces;
 /// Service interface for scraping radar screenshots from the BOM website.
 /// Orchestrates the multi-step process of navigating BOM, finding locations, and capturing radar screenshots.
 /// </summary>
-public interface IScrapingService
+public interface IScrapingService : ISingletonService
 {
     /// <summary>
     /// Scrapes a radar screenshot from the BOM website for a given location.

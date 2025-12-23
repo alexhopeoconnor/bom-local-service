@@ -7,7 +7,7 @@ namespace BomLocalService.Services.Scraping.Workflows;
 /// <summary>
 /// Future workflow for temperature map scraping (not yet implemented)
 /// </summary>
-public class TemperatureMapWorkflow : IWorkflow<RadarResponse>
+public class TemperatureMapWorkflow : ITemperatureMapWorkflow
 {
     private readonly ILogger<TemperatureMapWorkflow> _logger;
     

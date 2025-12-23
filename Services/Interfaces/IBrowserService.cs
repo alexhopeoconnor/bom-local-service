@@ -1,3 +1,4 @@
+using BomLocalService.Services.Interfaces.Registration;
 using Microsoft.Playwright;
 
 namespace BomLocalService.Services.Interfaces;
@@ -6,7 +7,7 @@ namespace BomLocalService.Services.Interfaces;
 /// Service interface for managing Playwright browser instances and automation.
 /// Handles browser lifecycle, context creation, and anti-detection measures for web scraping.
 /// </summary>
-public interface IBrowserService : IDisposable
+public interface IBrowserService : ISingletonService, IDisposable
 {
     /// <summary>
     /// Creates a new browser context with proper configuration for BOM website scraping.

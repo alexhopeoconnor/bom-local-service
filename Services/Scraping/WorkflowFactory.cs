@@ -1,3 +1,5 @@
+using BomLocalService.Services.Scraping.Workflows;
+
 namespace BomLocalService.Services.Scraping;
 
 public class WorkflowFactory : IWorkflowFactory
@@ -13,8 +15,10 @@ public class WorkflowFactory : IWorkflowFactory
     {
         return name switch
         {
-            "RadarScraping" => (IWorkflow<TResponse>)_serviceProvider.GetRequiredService<Workflows.RadarScrapingWorkflow>(),
-            "TemperatureMap" => (IWorkflow<TResponse>)_serviceProvider.GetRequiredService<Workflows.TemperatureMapWorkflow>(),
+            "RadarScraping" => _serviceProvider.GetRequiredService<IRadarScrapingWorkflow>() as IWorkflow<TResponse>
+                ?? throw new InvalidOperationException($"IRadarScrapingWorkflow is not IWorkflow<{typeof(TResponse).Name}>"),
+            "TemperatureMap" => _serviceProvider.GetRequiredService<ITemperatureMapWorkflow>() as IWorkflow<TResponse>
+                ?? throw new InvalidOperationException($"ITemperatureMapWorkflow is not IWorkflow<{typeof(TResponse).Name}>"),
             _ => throw new ArgumentException($"Unknown workflow: {name}")
         };
     }

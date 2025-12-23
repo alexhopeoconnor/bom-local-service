@@ -1,4 +1,5 @@
 using BomLocalService.Models;
+using BomLocalService.Services.Interfaces.Registration;
 
 namespace BomLocalService.Services.Interfaces;
 
@@ -6,7 +7,7 @@ namespace BomLocalService.Services.Interfaces;
 /// Service interface for managing cached radar screenshot files and metadata.
 /// Handles file system operations for storing and retrieving cached BOM radar screenshots.
 /// </summary>
-public interface ICacheService
+public interface ICacheService : ISingletonService
 {
     /// <summary>
     /// Gets the cached screenshot folder path and associated metadata for a location and data type.
@@ -90,7 +91,7 @@ public interface ICacheService
     Task SaveMetadataAsync(string cacheFolderPath, LastUpdatedInfo metadata, CancellationToken cancellationToken = default);
     
     /// <summary>
-    /// Saves frame metadata (frame index and minutes ago) to a frames.json file in the data type subfolder.
+    /// Saves frame metadata (frame index and observation time) to a frames.json file in the data type subfolder.
     /// </summary>
     /// <param name="cacheFolderPath">Full path to the cache folder</param>
     /// <param name="dataType">The type of cached data</param>

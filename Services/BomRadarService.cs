@@ -519,32 +519,27 @@ public class BomRadarService : IBomRadarService, IDisposable
             
             if (radarFrames.Count > 0)
             {
-                // Generate URLs and calculate absolute observation times for each frame
+                // Generate URLs and filter frames by unique absolute observation times
                 var uniqueFrames = new List<RadarFrame>();
                 
                 foreach (var frame in radarFrames)
                 {
                     frame.ImageUrl = $"/api/radar/{encodedSuburb}/{encodedState}/frame/{frame.FrameIndex}?cacheFolder={Uri.EscapeDataString(folderInfo.FolderName)}";
                     
-                    // Calculate absolute observation time for this frame
-                    // minutesAgo is relative to the cache folder's observation time
-                    // Validate that ObservationTime is reasonable (not default/min value)
-                    if (folderInfo.ObservationTime > DateTime.MinValue.AddYears(1) && frame.MinutesAgo >= 0)
+                    // Use absolute observation time directly (already set during capture)
+                    // Only include frames with unique absolute observation times
+                    // Since we process folders newest-first, this ensures we keep frames from the most recent cache folder
+                    if (frame.AbsoluteObservationTime.HasValue && 
+                        frame.AbsoluteObservationTime.Value > DateTime.MinValue.AddYears(1) &&
+                        !seenAbsoluteTimes.Contains(frame.AbsoluteObservationTime.Value))
                     {
-                        frame.AbsoluteObservationTime = folderInfo.ObservationTime.AddMinutes(-frame.MinutesAgo);
-                        
-                        // Only include frames with unique absolute observation times
-                        // Since we process folders newest-first, this ensures we keep frames from the most recent cache folder
-                        if (frame.AbsoluteObservationTime.HasValue && !seenAbsoluteTimes.Contains(frame.AbsoluteObservationTime.Value))
-                        {
-                            seenAbsoluteTimes.Add(frame.AbsoluteObservationTime.Value);
-                            uniqueFrames.Add(frame);
-                        }
+                        seenAbsoluteTimes.Add(frame.AbsoluteObservationTime.Value);
+                        uniqueFrames.Add(frame);
                     }
-                    else
+                    else if (!frame.AbsoluteObservationTime.HasValue)
                     {
-                        _logger.LogWarning("Skipping frame {FrameIndex} from folder {FolderName}: Invalid ObservationTime ({ObservationTime}) or MinutesAgo ({MinutesAgo})", 
-                            frame.FrameIndex, folderInfo.FolderName, folderInfo.ObservationTime, frame.MinutesAgo);
+                        _logger.LogWarning("Skipping frame {FrameIndex} from folder {FolderName}: Missing AbsoluteObservationTime", 
+                            frame.FrameIndex, folderInfo.FolderName);
                     }
                 }
                 

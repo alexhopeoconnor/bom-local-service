@@ -1,9 +1,12 @@
+using BomLocalService.Services.Interfaces.Registration;
+
 namespace BomLocalService.Services.Scraping;
 
 /// <summary>
 /// Interface for a single scraping step
+/// Steps are stateless (all request data is in ScrapingContext), so singleton lifetime is appropriate
 /// </summary>
-public interface IScrapingStep
+public interface IScrapingStep : ISingletonService
 {
     /// <summary>
     /// Unique name of the step

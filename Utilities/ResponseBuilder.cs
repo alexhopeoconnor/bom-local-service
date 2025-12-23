@@ -63,19 +63,8 @@ public static class ResponseBuilder
             }
         }
 
-        // Calculate AbsoluteObservationTime for all frames if metadata is available
+        // AbsoluteObservationTime is already set during capture, no calculation needed
         // This ensures consistency with the time series endpoint
-        if (metadata != null && metadata.ObservationTime > DateTime.MinValue.AddYears(1))
-        {
-            foreach (var frame in frames)
-            {
-                // Only calculate if not already set and MinutesAgo is valid
-                if (!frame.AbsoluteObservationTime.HasValue && frame.MinutesAgo >= 0)
-                {
-                    frame.AbsoluteObservationTime = metadata.ObservationTime.AddMinutes(-frame.MinutesAgo);
-                }
-            }
-        }
 
         // Calculate NextUpdateTime based on cache status:
         // - If cache is valid: NextUpdateTime = max(CacheExpiresAt, next background service check)

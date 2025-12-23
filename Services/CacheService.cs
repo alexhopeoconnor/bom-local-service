@@ -154,18 +154,18 @@ public class CacheService : ICacheService
             return null;
         }
         
-        // Load frame metadata to get accurate minutesAgo
+        // Load frame metadata to get observation time
         var framesMetadata = await LoadFramesMetadataAsync(cacheFolderPath, CachedDataType.Radar, cancellationToken);
         var frameMetadata = framesMetadata.FirstOrDefault(f => f.FrameIndex == frameIndex);
-        var minutesAgo = frameMetadata != null 
-            ? frameMetadata.MinutesAgo 
-            : 40 - (frameIndex * 5);
+        var observationTime = frameMetadata?.ObservationTime > DateTime.MinValue.AddYears(1) 
+            ? frameMetadata.ObservationTime 
+            : (DateTime?)null;
             
         return new RadarFrame
         {
             FrameIndex = frameIndex,
             ImagePath = framePath,
-            MinutesAgo = minutesAgo
+            AbsoluteObservationTime = observationTime
         };
     }
 
@@ -200,7 +200,7 @@ public class CacheService : ICacheService
             var framesMetadata = frames.Select(f => new FrameMetadata
             {
                 FrameIndex = f.FrameIndex,
-                MinutesAgo = f.MinutesAgo
+                ObservationTime = f.AbsoluteObservationTime ?? throw new InvalidOperationException($"Frame {f.FrameIndex} missing AbsoluteObservationTime")
             }).ToList();
             
             var framesPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath, dataType);
@@ -424,7 +424,8 @@ public class CacheService : ICacheService
         
         // Load frame metadata from frames.json if available
         var framesMetadata = await LoadFramesMetadataAsync(folderPath, dataType, cancellationToken);
-        var metadataDict = framesMetadata.ToDictionary(f => f.FrameIndex, f => f.MinutesAgo);
+        var metadataDict = framesMetadata.Where(f => f.ObservationTime > DateTime.MinValue.AddYears(1))
+            .ToDictionary(f => f.FrameIndex, f => f.ObservationTime);
         
         // Load frames from data type subfolder
         for (int i = 0; i < frameCount; i++)
@@ -434,15 +435,13 @@ public class CacheService : ICacheService
             {
                 if (dataType == CachedDataType.Radar)
                 {
-                    var minutesAgo = metadataDict.ContainsKey(i) 
-                        ? metadataDict[i] 
-                        : 40 - (i * 5);
+                    var observationTime = metadataDict.ContainsKey(i) ? metadataDict[i] : (DateTime?)null;
                     
                     frames.Add(new RadarFrame
                     {
                         FrameIndex = i,
                         ImagePath = framePath,
-                        MinutesAgo = minutesAgo
+                        AbsoluteObservationTime = observationTime
                     });
                 }
                 else

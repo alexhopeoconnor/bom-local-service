@@ -1,4 +1,5 @@
 using BomLocalService.Models;
+using BomLocalService.Services.Interfaces.Registration;
 using Microsoft.Playwright;
 
 namespace BomLocalService.Services.Interfaces;
@@ -7,7 +8,7 @@ namespace BomLocalService.Services.Interfaces;
 /// Service interface for parsing time and metadata information from BOM website content.
 /// Extracts observation times, forecast times, weather station names, and distances from BOM weather map pages.
 /// </summary>
-public interface ITimeParsingService
+public interface ITimeParsingService : ISingletonService
 {
     /// <summary>
     /// Extracts last updated information from a BOM weather map page.

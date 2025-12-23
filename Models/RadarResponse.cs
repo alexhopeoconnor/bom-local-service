@@ -8,7 +8,8 @@ public class RadarResponse
 {
     /// <summary>
     /// List of all captured frames (typically 7 frames: 0-6).
-    /// Frame 0 is oldest (40 minutes ago), Frame 6 is newest (10 minutes ago).
+    /// Each frame contains an absoluteObservationTime UTC timestamp.
+    /// Client should calculate "minutes ago" dynamically from the timestamp.
     /// </summary>
     public List<RadarFrame> Frames { get; set; } = new();
 

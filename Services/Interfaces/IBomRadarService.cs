@@ -1,4 +1,5 @@
 using BomLocalService.Models;
+using BomLocalService.Services.Interfaces.Registration;
 
 namespace BomLocalService.Services.Interfaces;
 
@@ -6,7 +7,7 @@ namespace BomLocalService.Services.Interfaces;
 /// Main service interface for BOM radar screenshot operations.
 /// Orchestrates cache management, browser automation, and web scraping to provide radar screenshots for Australian locations.
 /// </summary>
-public interface IBomRadarService
+public interface IBomRadarService : ISingletonService
 {
     /// <summary>
     /// Gets cached radar data for a location.

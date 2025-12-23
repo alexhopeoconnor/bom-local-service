@@ -67,112 +67,76 @@ public class TimeParsingService : ITimeParsingService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to extract last updated information");
-            return new LastUpdatedInfo
-            {
-                ObservationTime = DateTime.UtcNow,
-                ForecastTime = DateTime.UtcNow
-            };
+            _logger.LogError(ex, "Failed to extract last updated information");
+            throw;
         }
     }
 
     /// <summary>
     /// Parses last updated text to extract observation time, forecast time, weather station, and distance
+    /// Parses actual time strings to UTC timestamps - client calculates "minutes ago" dynamically
     /// </summary>
     public LastUpdatedInfo ParseLastUpdatedText(string text)
     {
         var info = new LastUpdatedInfo();
         _logger.LogInformation("Parsing last updated text: {Text}", text);
 
-        // Parse observation time - use "minutes ago" as primary source for accuracy
-        // "Minutes ago" is reliable and doesn't require date guessing
-        // Time string is used only as fallback if "minutes ago" is unavailable
-        var minutesAgoMatch = Regex.Match(text, @"Observations:\s*(\d+)\s*minutes?\s*ago", RegexOptions.IgnoreCase);
-        if (minutesAgoMatch.Success && int.TryParse(minutesAgoMatch.Groups[1].Value, out var minutesAgo))
+        // Parse observation time from time string (e.g., "9:40 pm AEST")
+        // Ignore "minutes ago" - client will calculate this dynamically from UTC timestamp
+        var observationMatch = Regex.Match(text, @"Observations:\s*(?:\d+\s*minutes?\s*ago)?[,\s]+([\d:]+(?:\s*[ap]m)?)\s+([A-Z]{3,4})(?:at|\s+at|,|$)", RegexOptions.IgnoreCase);
+        if (observationMatch.Success && observationMatch.Groups.Count >= 3 && observationMatch.Groups[1].Success)
         {
-            // Use "minutes ago" as primary source - it's accurate and doesn't require date guessing
-            info.ObservationTime = DateTime.UtcNow.AddMinutes(-minutesAgo);
-            _logger.LogInformation("Calculated observation time from 'minutes ago': {MinutesAgo} minutes ago = {Time} UTC", 
-                minutesAgo, info.ObservationTime);
-        }
-        else
-        {
-            // Fallback to time string parsing only if "minutes ago" is not available
-            var observationMatch = Regex.Match(text, @"Observations:\s*(?:\d+\s*minutes?\s*ago)?[,\s]+([\d:]+(?:\s*[ap]m)?)\s+([A-Z]{3,4})(?:at|\s+at|,|$)", RegexOptions.IgnoreCase);
-            if (observationMatch.Success && observationMatch.Groups.Count >= 3 && observationMatch.Groups[1].Success)
+            var timeStr = observationMatch.Groups[1].Value.Trim();
+            var timezoneStr = observationMatch.Groups[2].Success ? observationMatch.Groups[2].Value.Trim() : null;
+            
+            // Clean up timezone string - remove "at" if it got concatenated (e.g., "AESTat" -> "AEST")
+            if (!string.IsNullOrEmpty(timezoneStr) && timezoneStr.EndsWith("at", StringComparison.OrdinalIgnoreCase) && timezoneStr.Length > 2)
             {
-                var timeStr = observationMatch.Groups[1].Value.Trim();
-                var timezoneStr = observationMatch.Groups[2].Success ? observationMatch.Groups[2].Value.Trim() : null;
-                
-                // Clean up timezone string - remove "at" if it got concatenated (e.g., "AESTat" -> "AEST")
-                if (!string.IsNullOrEmpty(timezoneStr) && timezoneStr.EndsWith("at", StringComparison.OrdinalIgnoreCase) && timezoneStr.Length > 2)
-                {
-                    timezoneStr = timezoneStr.Substring(0, timezoneStr.Length - 2);
-                }
-                
-                if (TryParseTimeString(timeStr, timezoneStr, out var observationTime))
-                {
-                    info.ObservationTime = observationTime;
-                    _logger.LogInformation("Used time string fallback for observation time: {Time} UTC (from '{TimeStr}' {TzStr})", 
-                        observationTime, timeStr, timezoneStr ?? "default timezone");
-                }
-                else
-                {
-                    _logger.LogWarning("Failed to parse observation time from both 'minutes ago' and time string, using current time");
-                    info.ObservationTime = DateTime.UtcNow;
-                }
+                timezoneStr = timezoneStr.Substring(0, timezoneStr.Length - 2);
+            }
+            
+            if (TryParseTimeString(timeStr, timezoneStr, out var observationTime))
+            {
+                info.ObservationTime = observationTime;
+                _logger.LogInformation("Parsed observation time: {Time} UTC (from '{TimeStr}' {TzStr})", 
+                    observationTime, timeStr, timezoneStr ?? "default timezone");
             }
             else
             {
-                _logger.LogWarning("No observation time found in text, using current time");
-                info.ObservationTime = DateTime.UtcNow;
+                _logger.LogError("Failed to parse observation time from time string '{TimeStr}' with timezone '{TzStr}'", timeStr, timezoneStr ?? "default");
+                throw new InvalidOperationException($"Failed to parse observation time from text: {text}");
             }
-        }
-
-        // Parse forecast time - use "minutes ago" or "an hour ago" as primary source
-        // Handle both "X minutes ago" and "an hour ago" formats
-        var forecastMinutesAgoMatch = Regex.Match(text, @"Forecast:\s*(\d+)\s*minutes?\s*ago", RegexOptions.IgnoreCase);
-        var forecastHourAgoMatch = Regex.Match(text, @"Forecast:\s*an\s+hour\s+ago", RegexOptions.IgnoreCase);
-
-        if (forecastMinutesAgoMatch.Success && int.TryParse(forecastMinutesAgoMatch.Groups[1].Value, out var forecastMinutesAgo))
-        {
-            // Use "minutes ago" as primary source
-            info.ForecastTime = DateTime.UtcNow.AddMinutes(-forecastMinutesAgo);
-            _logger.LogInformation("Calculated forecast time from 'minutes ago': {MinutesAgo} minutes ago = {Time} UTC", 
-                forecastMinutesAgo, info.ForecastTime);
-        }
-        else if (forecastHourAgoMatch.Success)
-        {
-            // Handle "an hour ago" format
-            info.ForecastTime = DateTime.UtcNow.AddHours(-1);
-            _logger.LogInformation("Calculated forecast time from 'an hour ago': {Time} UTC", info.ForecastTime);
         }
         else
         {
-            // Fallback to time string parsing only if "minutes ago" or "an hour ago" is not available
-            var forecastMatch = Regex.Match(text, @"Forecast:\s*(?:an\s+hour\s+ago|\d+\s*minutes?\s*ago)?[,\s]*([\d:]+(?:\s*[ap]m)?)\s+([A-Z]+)(?:\s+at|$)", RegexOptions.IgnoreCase);
-            if (forecastMatch.Success && forecastMatch.Groups[1].Success)
+            _logger.LogError("No observation time found in text: {Text}", text);
+            throw new InvalidOperationException($"Could not find observation time in text: {text}");
+        }
+
+        // Parse forecast time from time string (e.g., "7:50 pm AEST")
+        // Ignore "minutes ago" - client will calculate this dynamically from UTC timestamp
+        var forecastMatch = Regex.Match(text, @"Forecast:\s*(?:an\s+hour\s+ago|\d+\s*minutes?\s*ago)?[,\s]*([\d:]+(?:\s*[ap]m)?)\s+([A-Z]+)(?:\s+at|$)", RegexOptions.IgnoreCase);
+        if (forecastMatch.Success && forecastMatch.Groups[1].Success)
+        {
+            var timeStr = forecastMatch.Groups[1].Value.Trim();
+            var timezoneStr = forecastMatch.Groups[2].Success ? forecastMatch.Groups[2].Value.Trim() : null;
+            
+            if (TryParseTimeString(timeStr, timezoneStr, out var forecastTime))
             {
-                var timeStr = forecastMatch.Groups[1].Value.Trim();
-                var timezoneStr = forecastMatch.Groups[2].Success ? forecastMatch.Groups[2].Value.Trim() : null;
-                
-                if (TryParseTimeString(timeStr, timezoneStr, out var forecastTime))
-                {
-                    info.ForecastTime = forecastTime;
-                    _logger.LogInformation("Used time string fallback for forecast time: {Time} UTC (from '{TimeStr}' {TzStr})", 
-                        forecastTime, timeStr, timezoneStr ?? "default timezone");
-                }
-                else
-                {
-                    _logger.LogWarning("Failed to parse forecast time from both 'minutes ago' and time string, using current time");
-                    info.ForecastTime = DateTime.UtcNow;
-                }
+                info.ForecastTime = forecastTime;
+                _logger.LogInformation("Parsed forecast time: {Time} UTC (from '{TimeStr}' {TzStr})", 
+                    forecastTime, timeStr, timezoneStr ?? "default timezone");
             }
             else
             {
-                _logger.LogWarning("No forecast time found in text, using current time");
-                info.ForecastTime = DateTime.UtcNow;
+                _logger.LogError("Failed to parse forecast time from time string '{TimeStr}' with timezone '{TzStr}'", timeStr, timezoneStr ?? "default");
+                throw new InvalidOperationException($"Failed to parse forecast time from text: {text}");
             }
+        }
+        else
+        {
+            _logger.LogError("No forecast time found in text: {Text}", text);
+            throw new InvalidOperationException($"Could not find forecast time in text: {text}");
         }
 
         // Extract weather station name
@@ -256,8 +220,7 @@ public class TimeParsingService : ITimeParsingService
             var dateTimeInTz = nowInTz.Date.Add(localTime.TimeOfDay);
             
             // Only adjust to yesterday if the time is clearly in the future
-            // Don't use the 12-hour threshold - it's too aggressive for recent observations
-            // This method is now only used as fallback when "minutes ago" is unavailable
+            // This ensures we get the correct date for the observation/forecast time
             if (dateTimeInTz > nowInTz)
             {
                 // Time is in the future, so it must be from yesterday

@@ -523,8 +523,7 @@ GET /api/radar/{suburb}/{state}
     {
       "frameIndex": 0,
       "imageUrl": "/api/radar/Brisbane/QLD/frame/0",
-      "minutesAgo": 0,
-      "observationTime": "2025-01-15T10:00:00Z"
+      "absoluteObservationTime": "2025-01-15T10:00:00Z"
     }
   ],
   "observationTime": "2025-01-15T10:00:00Z",
@@ -539,7 +538,7 @@ GET /api/radar/{suburb}/{state}
 ```
 
 **Response Fields:**
-- `frames`: Array of radar frame objects with image URLs and timing information
+- `frames`: Array of radar frame objects with image URLs. Each frame contains `absoluteObservationTime` (UTC timestamp). Client should calculate "minutes ago" dynamically from this timestamp.
 - `observationTime`: UTC timestamp when the observation was made
 - `forecastTime`: UTC timestamp for the forecast
 - `weatherStation`: Name of the weather station
@@ -669,8 +668,7 @@ GET /api/radar/{suburb}/{state}/timeseries?startTime={iso8601}&endTime={iso8601}
         {
           "frameIndex": 0,
           "imageUrl": "/api/radar/Brisbane/QLD/frame/0?cacheFolder=Brisbane_QLD_20250115_100000",
-          "absoluteObservationTime": "2025-01-15T10:00:00Z",
-          "minutesAgo": 0
+          "absoluteObservationTime": "2025-01-15T10:00:00Z"
         }
       ]
     }
@@ -1008,7 +1006,10 @@ if (radarData.frames && radarData.frames.length > 0) {
     
     // Or loop through all frames for animation
     radarData.frames.forEach((frame, index) => {
-        console.log(`Frame ${index}: ${frame.imageUrl} (${frame.minutesAgo} min ago)`);
+        const minutesAgo = frame.absoluteObservationTime 
+            ? Math.round((Date.now() - new Date(frame.absoluteObservationTime).getTime()) / 60000)
+            : null;
+        console.log(`Frame ${index}: ${frame.imageUrl}${minutesAgo !== null ? ` (${minutesAgo} min ago)` : ''}`);
     });
 }
 ```
