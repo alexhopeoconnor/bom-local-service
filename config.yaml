@@ -1,5 +1,5 @@
 name: "BOM Local Service"
-version: "1.0.0"
+version: "0.1.0"
 slug: "bom_local_service"
 description: "Local caching service for Australian Bureau of Meteorology radar data"
 url: "https://github.com/alexhopeoconnor/bom-local-service"
