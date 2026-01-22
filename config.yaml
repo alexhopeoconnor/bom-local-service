@@ -1,0 +1,41 @@
+name: "BOM Local Service"
+version: "1.0.0"
+slug: "bom_local_service"
+description: "Local caching service for Australian Bureau of Meteorology radar data"
+url: "https://github.com/alexhopeoconnor/bom-local-service"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: application
+boot: auto
+ports:
+  8080/tcp: 8082
+ports_description:
+  8080/tcp: "BOM Local Service API"
+map:
+  - share:rw
+image: "ghcr.io/alexhopeoconnor/bom-local-service"
+options:
+  cache_retention_hours: 24
+  cache_expiration_minutes: 12.5
+  timezone: "Australia/Brisbane"
+  cache_check_interval_minutes: 5
+  cache_cleanup_interval_hours: 1
+  debug_enabled: false
+schema:
+  cache_retention_hours: int(1,168)
+  cache_expiration_minutes: float(5.0,60.0)
+  timezone: str
+  cache_check_interval_minutes: int(1,60)
+  cache_cleanup_interval_hours: int(1,24)
+  debug_enabled: bool
+environment:
+  CACHEDIRECTORY: /share/bom-cache
+  CACHERETENTIONHOURS: cache_retention_hours
+  CACHEEXPIRATIONMINUTES: cache_expiration_minutes
+  TIMEZONE: timezone
+  CACHEMANAGEMENT__CHECKINTERVALMINUTES: cache_check_interval_minutes
+  CACHECLEANUP__INTERVALHOURS: cache_cleanup_interval_hours
+  DEBUG__ENABLED: debug_enabled
+  ASPNETCORE_URLS: "http://+:8080"
