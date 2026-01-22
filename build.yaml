@@ -1,0 +1,4 @@
+build_from:
+  amd64: "ghcr.io/alexhopeoconnor/bom-local-service:latest"
+  aarch64: "ghcr.io/alexhopeoconnor/bom-local-service:latest"
+  armv7: "ghcr.io/alexhopeoconnor/bom-local-service:latest"

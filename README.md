@@ -6,6 +6,29 @@
 
 A local caching service for Australian Bureau of Meteorology (BOM) radar data, designed to provide a reliable API for Home Assistant integrations and other local services.
 
+#### Quick Start
+
+1. Add this repository to Home Assistant:
+
+[![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Falexhopeoconnor%2Fbom-local-service)
+
+OR
+
+   - Navigate to **Settings** → **Add-ons** → **Add-on Store**
+   - Click the three dots (⋮) in the top right corner
+   - Select **Repositories**
+   - Add: `https://github.com/alexhopeoconnor/bom-local-service`
+   - Click **Add**
+
+2. Install the add-on:
+   - Find "BOM Local Service" in the add-on store
+   - Click **Install**
+
+3. Configure and start:
+   - Adjust settings in the Configuration tab
+   - Click **Start**
+   - Enable **Start on boot**
+
 ## Background
 
 The Australian Bureau of Meteorology's radar API endpoint (`https://api.weather.bom.gov.au/v1/radar/capabilities`) stopped working in December 2024, returning errors. This broke integrations like the popular [bom-radar-card](https://github.com/Makin-Things/bom-radar-card) for Home Assistant, which can no longer render due to the Cross-Origin Request Blocked error. 
@@ -67,7 +90,33 @@ The scraping system uses a **workflow-based architecture** with configurable ste
 
 ## Installation
 
-### Docker Image
+### Home Assistant Add-on (Recommended)
+
+The easiest way to use BOM Local Service is as a Home Assistant add-on:
+
+1. **Add this repository to Home Assistant:**
+   - Navigate to **Settings** → **Add-ons** → **Add-on Store**
+   - Click the three dots (⋮) in the top right corner
+   - Select **Repositories**
+   - Add: `https://github.com/alexhopeoconnor/bom-local-service`
+   - Click **Add**
+
+2. **Install the add-on:**
+   - Find "BOM Local Service" in the add-on store
+   - Click **Install**
+
+3. **Configure and start:**
+   - Adjust settings in the Configuration tab
+   - Click **Start**
+   - Enable **Start on boot**
+
+See [DOCS.md](DOCS.md) for detailed add-on documentation and configuration options.
+
+### Standalone Docker Deployment
+
+If you're not using Home Assistant or prefer standalone deployment:
+
+#### Docker Image
 
 Pre-built Docker images are available on GitHub Container Registry:
 
@@ -87,14 +136,12 @@ docker pull ghcr.io/alexhopeoconnor/bom-local-service:v0.0.1
 
 See all available versions on the [releases page](https://github.com/alexhopeoconnor/bom-local-service/releases).
 
-### Prerequisites
+#### Prerequisites
 
 - Docker Engine 20.10+ or Docker Desktop
 - Docker Compose v2.0+ (optional, for easier management)
 
-### Quick Start
-
-#### Option 1: Using Pre-built Docker Image (Recommended)
+#### Option 2: Using Pre-built Docker Image
 
 Pull the latest image from GitHub Container Registry:
 
@@ -148,7 +195,7 @@ docker run -d \
 
    **Note**: The `--shm-size=1gb` and `--ipc=host` flags are important for Playwright to function correctly in Docker.
 
-### Using Docker Compose
+#### Using Docker Compose
 
 The included `docker-compose.yml` provides a convenient way to run the service with all configuration options.
 
