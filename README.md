@@ -120,7 +120,30 @@ See all available versions on the [releases page](https://github.com/alexhopeoco
 
 #### Quick Start
 
-#### Option 1: Using Pre-built Docker Image (Recommended)
+#### Option 1: Using Addon (Recommended)
+
+1. Add this repository to Home Assistant:
+
+[![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Falexhopeoconnor%2Fbom-local-service)
+
+OR
+
+   - Navigate to **Settings** → **Add-ons** → **Add-on Store**
+   - Click the three dots (⋮) in the top right corner
+   - Select **Repositories**
+   - Add: `https://github.com/alexhopeoconnor/bom-local-service`
+   - Click **Add**
+
+2. Install the add-on:
+   - Find "BOM Local Service" in the add-on store
+   - Click **Install**
+
+3. Configure and start:
+   - Adjust settings in the Configuration tab
+   - Click **Start**
+   - Enable **Start on boot**
+
+#### Option 2: Using Pre-built Docker Image
 
 Pull the latest image from GitHub Container Registry:
 
