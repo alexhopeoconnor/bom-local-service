@@ -8,6 +8,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Local overrides remain usable during development but never ship. -->
+    <Content Update="**/appsettings.Local.json;**/appsettings.local.json;**/appsettings.Overrides.json;**/appsettings.*.local.json"
+             CopyToPublishDirectory="Never" />
+    <None Update="**/appsettings.Local.json;**/appsettings.local.json;**/appsettings.Overrides.json;**/appsettings.*.local.json"
+          CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Playwright" Version="1.57.0" />
   </ItemGroup>
 

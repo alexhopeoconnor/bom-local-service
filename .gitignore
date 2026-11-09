@@ -76,3 +76,43 @@ Desktop.ini
 # Keep Dockerfile and docker-compose.yml, ignore temporary Docker files
 *.dockerignore.bak
 
+# Local .NET configuration overrides
+appsettings.Local.json
+appsettings.local.json
+appsettings.Overrides.json
+appsettings.*.local.json
+
+# Local credentials and cloud CLI state
+**/.aws/
+**/.azure/
+**/.ssh/
+**/.kube/
+**/.config/gcloud/
+**/.config/gh/hosts.yml
+**/.docker/config.json
+**/.docker/contexts/
+.git-credentials
+.netrc
+_netrc
+.pypirc
+
+# Local environment values; review example files before sharing
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Agent runtime state; shared skills remain versionable
+**/.agents/*
+!**/.agents/skills/
+**/.codex/*
+!**/.codex/skills/
+**/.claude/*
+!**/.claude/skills/
+!**/.claude/commands/
+
+# Retired Cursor editor configuration
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
