@@ -269,11 +269,12 @@ export function showFrame(index) {
  */
 export function findFrameToShowAfterRefresh() {
     if (state.frames.length === 0) return 0;
-    
-    const previousFrameIndex = state.currentFrameIndex;
-    if (previousFrameIndex < 0 || !state.radarData?.frames) return 0;
-    
-    const previousFrame = state.radarData.frames[previousFrameIndex];
+
+    const previousFrames = state.previousFrames || [];
+    const previousFrameIndex = state.previousFrameIndex ?? state.currentFrameIndex;
+    if (previousFrameIndex < 0 || previousFrames.length === 0) return 0;
+
+    const previousFrame = previousFrames[previousFrameIndex];
     if (!previousFrame) return 0;
     
     if (previousFrame.absoluteObservationTime) {
@@ -299,7 +300,7 @@ export function findFrameToShowAfterRefresh() {
         return closestIndex;
     }
     
-    // Fallback: keep same index if valid
-    return previousFrameIndex < state.frames.length ? previousFrameIndex : 0;
+    // Fallback: clamp the previous index to the shorter replacement collection.
+    return Math.max(0, Math.min(state.frames.length - 1, previousFrameIndex));
 }
 

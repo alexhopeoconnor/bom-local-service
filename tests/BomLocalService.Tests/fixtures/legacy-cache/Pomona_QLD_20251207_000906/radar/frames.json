@@ -1,0 +1,30 @@
+[
+  {
+    "FrameIndex": 0,
+    "ObservationTime": "2025-12-06T23:30:00Z"
+  },
+  {
+    "FrameIndex": 1,
+    "ObservationTime": "2025-12-06T23:35:00Z"
+  },
+  {
+    "FrameIndex": 2,
+    "ObservationTime": "2025-12-06T23:40:00Z"
+  },
+  {
+    "FrameIndex": 3,
+    "ObservationTime": "2025-12-06T23:45:00Z"
+  },
+  {
+    "FrameIndex": 4,
+    "ObservationTime": "2025-12-06T23:50:00Z"
+  },
+  {
+    "FrameIndex": 5,
+    "ObservationTime": "2025-12-06T23:55:00Z"
+  },
+  {
+    "FrameIndex": 6,
+    "ObservationTime": "2025-12-07T00:00:00Z"
+  }
+]

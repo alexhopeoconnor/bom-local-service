@@ -158,7 +158,13 @@ export function createCacheStatusData(errorData) {
         isUpdating: isUpdating,
         cacheIsValid: details.cacheIsValid || false,
         cacheExpiresAt: details.cacheExpiresAt || null,
-        nextUpdateTime: details.nextUpdateTime || null
+        nextUpdateTime: details.nextUpdateTime || null,
+        updateFailed: details.previousUpdateFailed === true || details.updateFailed === true,
+        errorCode: details.previousErrorCode || details.errorCode || details.refreshRejected || null,
+        error: details.previousError || details.error || null,
+        nextRetryAt: details.nextRetryAt || null,
+        consecutiveFailures: details.consecutiveFailures || 0,
+        retryAfterSeconds: details.retryAfterSeconds || null
     };
 }
 

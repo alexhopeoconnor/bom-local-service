@@ -1,0 +1,47 @@
+name: Live BOM verification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 20 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  live-bom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build -t bom-local-service:live .
+
+      - name: Run live verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache="$(mktemp -d)"
+          docker run -d --name bom-live --publish 127.0.0.1:18082:8080 \
+            --mount "type=bind,source=$cache,target=/app/cache" \
+            --shm-size=1g --env DEBUG__ENABLED=false --env CACHEMANAGEMENT__INITIALDELAYSECONDS=3600 \
+            bom-local-service:live
+          cleanup() { docker rm -f bom-live >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:18082/api/health >/dev/null && break
+            sleep 2
+          done
+          ./scripts/verify-service.sh \
+            --base-url http://127.0.0.1:18082 \
+            --suburb Pomona \
+            --state QLD \
+            --output artifacts/verification
+
+      - name: Upload live verification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-verification
+          path: artifacts/verification

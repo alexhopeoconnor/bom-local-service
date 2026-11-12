@@ -1,32 +1,28 @@
 services:
   bom-local-service:
+    image: ${BOM_IMAGE:-ghcr.io/alexhopeoconnor/bom-local-service:v0.1.1}
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: bom-local-service
     ports:
       - "${HOST_PORT:-8082}:${CONTAINER_PORT:-8080}"
     volumes:
-      - ./cache:/app/cache
+      - "${BOM_CACHE_PATH:-./cache}:/app/cache"
     environment:
       # ASP.NET Core configuration
-      # Default to Production for security (use Development only for local debugging)
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT:-Production}
       - ASPNETCORE_URLS=http://+:${CONTAINER_PORT:-8080}
-      
-      # Virtual display for non-headless browser
+
+      # Virtual display for the non-headless browser
       - DISPLAY=:99
-      
+
       # CORS Configuration (for Home Assistant integration)
-      # Multiple origins can be comma-separated: "http://homeassistant.local:8123,http://192.168.1.100:8123"
-      # Use "*" to allow all origins (less secure, but convenient for development)
       - CORS__ALLOWEDORIGINS=${CORS__ALLOWEDORIGINS:-*}
-      - CORS__ALLOWEDMETHODS=${CORS__ALLOWEDMETHODS:-GET,POST,OPTIONS}
+      - CORS__ALLOWEDMETHODS=${CORS__ALLOWEDMETHODS:-GET,POST,DELETE,OPTIONS}
       - CORS__ALLOWEDHEADERS=${CORS__ALLOWEDHEADERS:-*}
       - CORS__ALLOWCREDENTIALS=${CORS__ALLOWCREDENTIALS:-false}
-      
-      # Application configuration (override appsettings.json)
-      # Use double underscore (__) for nested config keys
+
+      # Application configuration (double underscore for nested keys)
       - CACHEDIRECTORY=${CACHEDIRECTORY:-/app/cache}
       - CACHERETENTIONHOURS=${CACHERETENTIONHOURS:-24}
       - CACHEEXPIRATIONMINUTES=${CACHEEXPIRATIONMINUTES:-12.5}
@@ -34,19 +30,19 @@ services:
       - CACHEMANAGEMENT__INITIALDELAYSECONDS=${CACHEMANAGEMENT__INITIALDELAYSECONDS:-10}
       - CACHEMANAGEMENT__LOCATIONSTAGGERSECONDS=${CACHEMANAGEMENT__LOCATIONSTAGGERSECONDS:-1}
       - CACHECLEANUP__INTERVALHOURS=${CACHECLEANUP__INTERVALHOURS:-1}
-      - SCREENSHOT__DYNAMICCONTENTWAITMS=${SCREENSHOT__DYNAMICCONTENTWAITMS:-2000}
-      - SCREENSHOT__TILERENDERWAITMS=${SCREENSHOT__TILERENDERWAITMS:-5000}
-      - DEBUG__ENABLED=${DEBUG__ENABLED:-true}
+      - REFRESH__QUEUECAPACITY=${REFRESH__QUEUECAPACITY:-16}
+      - REFRESH__MAXCONCURRENTCAPTURES=${REFRESH__MAXCONCURRENTCAPTURES:-1}
+      - REFRESH__CAPTURETIMEOUTSECONDS=${REFRESH__CAPTURETIMEOUTSECONDS:-300}
+      - REFRESH__BACKOFFBASESECONDS=${REFRESH__BACKOFFBASESECONDS:-60}
+      - REFRESH__MAXBACKOFFSECONDS=${REFRESH__MAXBACKOFFSECONDS:-900}
+      - SCREENSHOT__DYNAMICCONTENTWAITMS=${SCREENSHOT__DYNAMICCONTENTWAITMS:-1500}
+      - SCREENSHOT__TILERENDERWAITMS=${SCREENSHOT__TILERENDERWAITMS:-3000}
+      - DEBUG__ENABLED=${DEBUG__ENABLED:-false}
       - DEBUG__WAITMS=${DEBUG__WAITMS:-2000}
       - TIMEZONE=${TIMEZONE:-Australia/Brisbane}
-    shm_size: '1gb'
-    ipc: host
+    shm_size: ${BOM_SHM_SIZE:-1gb}
+    ipc: ${BOM_IPC:-host}
+    cpus: ${BOM_CPU_LIMIT:-2.0}
+    mem_limit: ${BOM_MEMORY_LIMIT:-2g}
+    init: true
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-

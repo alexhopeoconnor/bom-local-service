@@ -3,26 +3,82 @@ name: Publish Docker image
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-and-push-image:
+  validate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          global-json-file: global.json
+
+      - name: Locked restore
+        run: |
+          dotnet restore BomLocalService.csproj --locked-mode
+          dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
+
+      - name: Test
+        run: |
+          dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
+            --configuration Release --no-restore \
+            --logger trx --results-directory artifacts/test-results
+
+      - name: Publish
+        run: |
+          dotnet publish BomLocalService.csproj \
+            --configuration Release --no-restore --output artifacts/publish
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          test -f artifacts/publish/BomLocalService.dll
+          test ! -e artifacts/publish/tests
+          test ! -e artifacts/publish/global.json
+          test -n "$tag"
+
+  build-smoke-publish-image:
+    needs: validate
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
       attestations: write
       id-token: write
-
     steps:
-      - name: Checkout repository
+      - name: Checkout release revision
         uses: actions/checkout@v5
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -34,26 +90,94 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-
-      - name: Build and push Docker image
-        id: push
+      - name: Build one native image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: bom-local-service:release-${{ matrix.arch }}
 
-      - name: Generate artifact attestation
+      - name: Smoke-test the native image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache="$(mktemp -d)"
+          docker run -d --name "bom-release-${{ matrix.arch }}" \
+            --publish 127.0.0.1:18082:8080 \
+            --mount "type=bind,source=$cache,target=/app/cache" \
+            --shm-size=1g --env DEBUG__ENABLED=false \
+            "bom-local-service:release-${{ matrix.arch }}"
+          cleanup() { docker rm -f "bom-release-${{ matrix.arch }}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:18082/api/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:18082/api/health
+          curl -fsS http://127.0.0.1:18082/api/ready | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="ready"'
+          docker exec "bom-release-${{ matrix.arch }}" dotnet --list-runtimes | grep -E '^Microsoft\.AspNetCore\.App 10\.'
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' bom-local-service:release-${{ matrix.arch }})" = "linux/${{ matrix.arch }}"
+
+      - name: Publish the exact tested image
+        id: publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          arch_tag="${REGISTRY}/${IMAGE_NAME}:${tag}-${{ matrix.arch }}"
+          docker tag "bom-local-service:release-${{ matrix.arch }}" "$arch_tag"
+          push_output="$(docker push "$arch_tag")"
+          printf '%s\n' "$push_output"
+          digest="$(printf '%s\n' "$push_output" | awk '/digest:/ {print $3; exit}')"
+          test -n "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "tag=$arch_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Attest tested architecture image
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+  publish-manifest:
+    needs: [validate, build-smoke-publish-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge tested architecture images
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          docker buildx imagetools create \
+            --tag "${REGISTRY}/${IMAGE_NAME}:${tag}" \
+            --tag "${REGISTRY}/${IMAGE_NAME}:latest" \
+            "${REGISTRY}/${IMAGE_NAME}:${tag}-amd64" \
+            "${REGISTRY}/${IMAGE_NAME}:${tag}-arm64"
+          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${tag}"
+          digest="$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${tag}" | awk '/^Digest:/{print $2; exit}')"
+          test -n "$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest merged release index
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
           push-to-registry: true

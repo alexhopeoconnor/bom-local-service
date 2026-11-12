@@ -5,6 +5,8 @@ import { DEFAULT_SETTINGS } from './config.js';
 export const state = {
     currentFrameIndex: 0,
     frames: [],
+    previousFrames: [],
+    previousFrameIndex: 0,
     radarData: null,
     playInterval: null,
     isPlaying: false,
@@ -24,6 +26,8 @@ export const state = {
 export function resetState() {
     state.currentFrameIndex = 0;
     state.frames = [];
+    state.previousFrames = [];
+    state.previousFrameIndex = 0;
     state.radarData = null;
     state.playInterval = null;
     state.isPlaying = false;

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Function to cleanup stale Xvfb processes and lock files
 cleanup_xvfb() {
@@ -109,5 +109,12 @@ export DISPLAY=:99
 # Start monitoring in background (will check if PID 1 is still running)
 monitor_xvfb &
 
-# Start the .NET application (replaces shell as PID 1)
-exec dotnet BomLocalService.dll
+# Validate the runtime before starting; the image must include ASP.NET Core 10.
+if ! dotnet --list-runtimes | grep -qE '^Microsoft\.AspNetCore\.App 10\.'; then
+    echo "ERROR: Microsoft.AspNetCore.App 10.x is not installed" >&2
+    dotnet --list-runtimes >&2 || true
+    exit 1
+fi
+
+# Start the .NET application (replaces shell as PID 1). dotnet handles SIGTERM.
+exec dotnet BomLocalService.dll "$@"

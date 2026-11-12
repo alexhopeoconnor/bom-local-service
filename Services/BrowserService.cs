@@ -3,53 +3,64 @@ using Microsoft.Playwright;
 
 namespace BomLocalService.Services;
 
-public class BrowserService : IBrowserService
+public sealed class BrowserService : IBrowserService
 {
     private readonly ILogger<BrowserService> _logger;
     private readonly string _timezone;
     private readonly IDebugService _debugService;
+    private readonly SemaphoreSlim _browserLock = new(1, 1);
     private IPlaywright? _playwright;
     private IBrowser? _browser;
-    private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private bool _disposed;
 
     public BrowserService(ILogger<BrowserService> logger, IConfiguration configuration, IDebugService debugService)
     {
         _logger = logger;
-        // Get timezone from configuration (default from appsettings.json, can be overridden via TIMEZONE environment variable)
+        _debugService = debugService;
+
         var timezone = configuration.GetValue<string>("Timezone");
-        
         if (string.IsNullOrEmpty(timezone))
         {
             throw new InvalidOperationException("Timezone configuration is required. Set it in appsettings.json or via TIMEZONE environment variable.");
         }
-        
+
         _timezone = timezone;
-        _debugService = debugService;
     }
 
-    /// <summary>
-    /// Gets or creates the Playwright instance
-    /// </summary>
-    private async Task<IPlaywright> GetPlaywrightAsync()
+    public bool IsBrowserConnected
     {
-        if (_playwright == null)
+        get
         {
-            _playwright = await Microsoft.Playwright.Playwright.CreateAsync();
-        }
-        return _playwright;
-    }
-
-    /// <summary>
-    /// Gets or creates the browser instance
-    /// </summary>
-    public async Task<IBrowser> GetBrowserAsync()
-    {
-        if (_browser == null)
-        {
-            var playwright = await GetPlaywrightAsync();
-            _browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            try
             {
-                Headless = false, // Run in visible mode with virtual display (Xvfb)
+                return !_disposed && _browser?.IsConnected == true;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+        }
+    }
+
+    public async Task<IBrowser> GetBrowserAsync(CancellationToken cancellationToken = default)
+    {
+        await _browserLock.WaitAsync(cancellationToken);
+        try
+        {
+            ThrowIfDisposed();
+
+            if (_browser is { IsConnected: true })
+            {
+                return _browser;
+            }
+
+            await DisposeBrowserLockedAsync();
+
+            _playwright ??= await Microsoft.Playwright.Playwright.CreateAsync();
+            _logger.LogInformation("Launching Chromium");
+            _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            {
+                Headless = false,
                 Args = new[]
                 {
                     "--no-sandbox",
@@ -86,138 +97,221 @@ public class BrowserService : IBrowserService
                     "--enable-automation=false",
                     "--exclude-switches=enable-automation",
                     "--disable-features=UserAgentClientHint",
-                    "--enable-unsafe-swiftshader", // Required for software WebGL (Chrome 137+ deprecated automatic fallback)
-                    "--use-gl=swiftshader" // Use SwiftShader for WebGL software rendering
+                    "--enable-unsafe-swiftshader",
+                    "--use-gl=swiftshader"
                 }
             });
-        }
-        return _browser;
-    }
 
-    /// <summary>
-    /// Creates a new browser context with proper configuration
-    /// </summary>
-    public async Task<IBrowserContext> CreateContextAsync()
-    {
-        var browser = await GetBrowserAsync();
-        return await browser.NewContextAsync(new BrowserNewContextOptions
-        {
-            ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-            DeviceScaleFactor = 2.0f, // 2x scale for higher resolution screenshots (better text quality)
-            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            Locale = "en-AU",
-            TimezoneId = _timezone,
-            Permissions = new[] { "geolocation" },
-            ExtraHTTPHeaders = new Dictionary<string, string>
+            _browser.Disconnected += (_, _) =>
             {
-                { "Accept-Language", "en-AU,en;q=0.9" },
-                { "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" },
-                { "Accept-Encoding", "gzip, deflate, br" },
-                { "Connection", "keep-alive" },
-                { "Upgrade-Insecure-Requests", "1" },
-                { "Sec-Fetch-Dest", "document" },
-                { "Sec-Fetch-Mode", "navigate" },
-                { "Sec-Fetch-Site", "none" },
-                { "Cache-Control", "max-age=0" }
-            }
-        });
+                _logger.LogWarning("Chromium disconnected; the next capture will recreate it");
+            };
+
+            return _browser;
+        }
+        finally
+        {
+            _browserLock.Release();
+        }
     }
 
-    /// <summary>
-    /// Creates a new page with anti-detection scripts and debug event handlers
-    /// </summary>
+    public async Task<IBrowserContext> CreateContextAsync(CancellationToken cancellationToken = default)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var browser = await GetBrowserAsync(cancellationToken);
+            try
+            {
+                return await browser.NewContextAsync(CreateContextOptions());
+            }
+            catch (PlaywrightException ex) when (attempt == 0)
+            {
+                _logger.LogWarning(ex, "Failed to create browser context; recreating Chromium and retrying once");
+                await ResetCoreAsync(browser, cancellationToken);
+            }
+        }
+
+        throw new InvalidOperationException("Could not create a browser context after recreating Chromium");
+    }
+
+    private BrowserNewContextOptions CreateContextOptions() => new()
+    {
+        ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+        DeviceScaleFactor = 2.0f,
+        UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Locale = "en-AU",
+        TimezoneId = _timezone,
+        Permissions = new[] { "geolocation" },
+        ExtraHTTPHeaders = new Dictionary<string, string>
+        {
+            { "Accept-Language", "en-AU,en;q=0.9" },
+            { "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" },
+            { "Accept-Encoding", "gzip, deflate, br" },
+            { "Connection", "keep-alive" },
+            { "Upgrade-Insecure-Requests", "1" },
+            { "Sec-Fetch-Dest", "document" },
+            { "Sec-Fetch-Mode", "navigate" },
+            { "Sec-Fetch-Site", "none" },
+            { "Cache-Control", "max-age=0" }
+        }
+    };
+
     public async Task<(IPage page, List<(string type, string text, DateTime timestamp)> consoleMessages, List<(string method, string url, int? status, string resourceType, DateTime timestamp)> networkRequests)> CreatePageWithDebugAsync(
-        IBrowserContext context, 
+        IBrowserContext context,
         string requestId)
     {
         var page = await context.NewPageAsync();
-        
-        // Set up console message and network request capture for debugging
         var consoleMessages = new List<(string type, string text, DateTime timestamp)>();
         var networkRequests = new List<(string method, string url, int? status, string resourceType, DateTime timestamp)>();
-        
+
         if (_debugService.IsEnabled)
         {
-            // Capture page console messages (console.log, console.error, etc.)
-            page.Console += (sender, e) =>
-            {
-                consoleMessages.Add((e.Type.ToString(), e.Text, DateTime.UtcNow));
-            };
-            
-            // Capture page errors (unhandled JavaScript errors)
-            page.PageError += (sender, e) =>
-            {
-                consoleMessages.Add(("error", $"PageError: {e}", DateTime.UtcNow));
-            };
-            
-            // Capture context console messages (broader scope, may include more warnings)
-            context.Console += (sender, e) =>
-            {
-                consoleMessages.Add((e.Type.ToString(), $"[Context] {e.Text}", DateTime.UtcNow));
-            };
-            
-            // Capture network requests
-            page.Request += (sender, e) =>
+            page.Console += (_, e) => consoleMessages.Add((e.Type.ToString(), e.Text, DateTime.UtcNow));
+            page.PageError += (_, e) => consoleMessages.Add(("error", $"PageError: {e}", DateTime.UtcNow));
+            context.Console += (_, e) => consoleMessages.Add((e.Type.ToString(), $"[Context] {e.Text}", DateTime.UtcNow));
+            page.Request += (_, e) => networkRequests.Add((e.Method, e.Url, null, e.ResourceType, DateTime.UtcNow));
+            page.RequestFailed += (_, e) =>
             {
                 networkRequests.Add((e.Method, e.Url, null, e.ResourceType, DateTime.UtcNow));
+                consoleMessages.Add(("error", $"Request failed: {e.Method} {e.Url} - {e.Failure}", DateTime.UtcNow));
             };
-            
-            // Capture failed requests (these often show up as console errors in browser)
-            page.RequestFailed += (sender, e) =>
+            page.Response += (_, e) =>
             {
-                networkRequests.Add((e.Method, e.Url, null, e.ResourceType, DateTime.UtcNow));
-                var failureText = e.Failure?.ToString() ?? "Unknown failure";
-                consoleMessages.Add(("error", $"Request failed: {e.Method} {e.Url} - {failureText}", DateTime.UtcNow));
-            };
-            
-            page.Response += (sender, e) =>
-            {
-                // Update the request with response status
-                var matchingRequests = networkRequests.Where(r => r.url == e.Request.Url && r.status == null).ToList();
-                if (matchingRequests.Any())
+                var matching = networkRequests
+                    .Select((request, index) => (request, index))
+                    .Where(x => x.request.url == e.Request.Url && x.request.status == null)
+                    .ToList();
+                if (matching.Count > 0)
                 {
-                    var request = matchingRequests.Last();
-                    var index = networkRequests.IndexOf(request);
+                    var (request, index) = matching[^1];
                     networkRequests[index] = (request.method, request.url, e.Status, request.resourceType, request.timestamp);
                 }
             };
         }
-        
-        // Inject comprehensive anti-detection scripts (must run before page load)
+
         await page.AddInitScriptAsync(GetAntiDetectionScript());
-        
         return (page, consoleMessages, networkRequests);
     }
 
-    /// <summary>
-    /// Gets the anti-detection JavaScript script
-    /// </summary>
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        _logger.LogInformation("Pre-warming browser");
+        try
+        {
+            await GetBrowserAsync(cancellationToken);
+            _logger.LogInformation("Browser initialized and ready");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Failed to pre-warm browser, will initialize on first use");
+        }
+    }
+
+    public async Task ResetAsync(CancellationToken cancellationToken = default)
+    {
+        await _browserLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _logger.LogInformation("Resetting Chromium browser");
+            await DisposeBrowserLockedAsync();
+        }
+        finally
+        {
+            _browserLock.Release();
+        }
+    }
+
+    private async Task ResetCoreAsync(IBrowser expected, CancellationToken cancellationToken)
+    {
+        await _browserLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (ReferenceEquals(_browser, expected))
+            {
+                await DisposeBrowserLockedAsync();
+            }
+        }
+        finally
+        {
+            _browserLock.Release();
+        }
+    }
+
+    private async Task DisposeBrowserLockedAsync()
+    {
+        var browser = _browser;
+        _browser = null;
+        if (browser == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await browser.CloseAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error closing Chromium");
+        }
+        finally
+        {
+            try
+            {
+                await browser.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Error disposing Chromium");
+            }
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    public void Dispose()
+    {
+        DisposeAsync().AsTask().GetAwaiter().GetResult();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _browserLock.WaitAsync();
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            await DisposeBrowserLockedAsync();
+            _playwright?.Dispose();
+            _playwright = null;
+        }
+        finally
+        {
+            _browserLock.Release();
+        }
+    }
+
     private static string GetAntiDetectionScript()
     {
         return @"
             (function() {
                 'use strict';
-
-                // Remove webdriver property completely
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                    configurable: true
-                });
-
-                // Delete it from prototype chain
-                try {
-                    delete navigator.__proto__.webdriver;
-                } catch (e) {}
-
-                // Override chrome object
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
-
-                // Override plugins with realistic data
+                Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+                try { delete navigator.__proto__.webdriver; } catch (e) {}
+                window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
                 Object.defineProperty(navigator, 'plugins', {
                     get: () => {
                         const plugins = [];
@@ -234,144 +328,41 @@ public class BrowserService : IBrowserService
                     },
                     configurable: true
                 });
-
-                // Override languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-AU', 'en', 'en-US'],
-                    configurable: true
-                });
-
-                // Override language
-                Object.defineProperty(navigator, 'language', {
-                    get: () => 'en-AU',
-                    configurable: true
-                });
-
-                // Override vendor
-                Object.defineProperty(navigator, 'vendor', {
-                    get: () => 'Google Inc.',
-                    configurable: true
-                });
-
-                // Override platform
-                Object.defineProperty(navigator, 'platform', {
-                    get: () => 'Win32',
-                    configurable: true
-                });
-
-                // Override hardwareConcurrency
-                Object.defineProperty(navigator, 'hardwareConcurrency', {
-                    get: () => 8,
-                    configurable: true
-                });
-
-                // Override deviceMemory
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-AU', 'en', 'en-US'], configurable: true });
+                Object.defineProperty(navigator, 'language', { get: () => 'en-AU', configurable: true });
+                Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
+                Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
                 if ('deviceMemory' in navigator) {
-                    Object.defineProperty(navigator, 'deviceMemory', {
-                        get: () => 8,
-                        configurable: true
-                    });
+                    Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
                 }
-
-                // Spoof connection - use named functions to avoid warnings
                 Object.defineProperty(navigator, 'connection', {
                     get: () => ({
-                        effectiveType: '4g',
-                        rtt: 50,
-                        downlink: 10,
-                        saveData: false,
-                        onchange: null,
+                        effectiveType: '4g', rtt: 50, downlink: 10, saveData: false, onchange: null,
                         addEventListener: function addEventListener() {},
                         removeEventListener: function removeEventListener() {},
                         dispatchEvent: function dispatchEvent() { return true; }
                     }),
                     configurable: true
                 });
-
-                // Override permissions API - bind context to avoid illegal invocation
                 const originalQuery = window.navigator.permissions.query.bind(window.navigator.permissions);
                 window.navigator.permissions.query = function query(parameters) {
                     return parameters.name === 'notifications' ?
                         Promise.resolve({ state: Notification.permission }) :
                         originalQuery(parameters);
                 };
-
-                // Override getBattery - bind context to avoid illegal invocation
                 if ('getBattery' in navigator) {
                     navigator.getBattery = function getBattery() {
                         return Promise.resolve({
-                            charging: true,
-                            chargingTime: 0,
-                            dischargingTime: Infinity,
-                            level: 1,
-                            onchargingchange: null,
-                            onchargingtimechange: null,
-                            ondischargingtimechange: null,
-                            onlevelchange: null,
+                            charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1,
+                            onchargingchange: null, onchargingtimechange: null, ondischargingtimechange: null, onlevelchange: null,
                             addEventListener: function addEventListener() {},
                             removeEventListener: function removeEventListener() {},
                             dispatchEvent: function dispatchEvent() { return true; }
                         });
                     };
                 }
-
-                // DON'T use Proxy on navigator - it breaks APIs like getGamepads()
-                // Just hide webdriver property directly
-                try {
-                    delete navigator.__proto__.webdriver;
-                } catch (e) {}
-
-                // AudioContext fingerprinting
-                if (window.AudioContext) {
-                    const originalAudioContext = window.AudioContext;
-                    window.AudioContext = function() {
-                        const ctx = new originalAudioContext();
-                        const originalCreateOscillator = ctx.createOscillator;
-                        ctx.createOscillator = function() {
-                            const oscillator = originalCreateOscillator.call(this);
-                            const originalFrequency = Object.getOwnPropertyDescriptor(
-                                AudioParam.prototype, 'value'
-                            ).get;
-                            Object.defineProperty(oscillator.frequency, 'value', {
-                                get: originalFrequency,
-                                set: function() {}
-                            });
-                            return oscillator;
-                        };
-                        return ctx;
-                    };
-                }
             })();
         ";
     }
-
-    /// <summary>
-    /// Initializes the browser (pre-warming)
-    /// </summary>
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
-    {
-        _logger.LogInformation("Pre-warming browser");
-        try
-        {
-            await GetBrowserAsync();
-            _logger.LogInformation("Browser initialized and ready");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to pre-warm browser, will initialize on first use");
-        }
-    }
-
-    /// <summary>
-    /// Gets the semaphore for synchronizing browser operations
-    /// </summary>
-    public SemaphoreSlim GetSemaphore() => _semaphore;
-
-    public void Dispose()
-    {
-        _browser?.DisposeAsync().AsTask().Wait();
-        _playwright?.Dispose();
-        _semaphore?.Dispose();
-    }
 }
-

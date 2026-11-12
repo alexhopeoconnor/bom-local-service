@@ -1,0 +1,159 @@
+name: Service checks
+
+on:
+  push:
+    branches: [main, "fix/**"]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          global-json-file: global.json
+
+      - name: Restore application (locked)
+        run: dotnet restore BomLocalService.csproj --locked-mode
+
+      - name: Restore tests (locked)
+        run: dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
+
+      - name: Test
+        run: |
+          dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
+            --configuration Release \
+            --no-restore \
+            --logger trx \
+            --results-directory artifacts/test-results
+
+      - name: Publish
+        run: |
+          dotnet publish BomLocalService.csproj \
+            --configuration Release \
+            --no-restore \
+            --output artifacts/publish
+
+      - name: Verify publication content
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f artifacts/publish/BomLocalService.dll
+          test -d artifacts/publish/wwwroot
+          test ! -e artifacts/publish/tests
+          test ! -e artifacts/publish/artifacts
+          test ! -e artifacts/publish/cache
+          test ! -e artifacts/publish/global.json
+          if find artifacts/publish -type f \( -name '*.trx' -o -name 'packages.lock.json' -o -name '*Tests.dll' \) | grep -q .; then
+            echo "published output contains test or restore artifacts" >&2
+            exit 1
+          fi
+          if find artifacts/publish -type f -name 'appsettings.Local.json' | grep -q .; then
+            echo "published output contains local overrides" >&2
+            exit 1
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: artifacts/test-results
+
+      - name: Upload published output
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-app
+          path: artifacts/publish
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    needs: build-test-publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build CPU image
+        run: docker build -t bom-local-service:ci .
+
+      - name: Run CPU-only smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache="$(mktemp -d)"
+          docker run -d --name bom-ci --publish 127.0.0.1:18082:8080 \
+            --mount "type=bind,source=$cache,target=/app/cache" \
+            --shm-size=1g --env DEBUG__ENABLED=false bom-local-service:ci
+          cleanup() { docker rm -f bom-ci >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:18082/api/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:18082/api/health
+          curl -fsS http://127.0.0.1:18082/api/ready | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="ready"; assert d["checks"]["refreshWorker"] is True'
+          docker exec bom-ci dotnet --list-runtimes | grep -E '^Microsoft\.AspNetCore\.App 10\.'
+          # No live BOM request is made by this required check.
+
+  demo-browser:
+    runs-on: ubuntu-latest
+    needs: container-smoke
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          global-json-file: global.json
+
+      - name: Build tests and install Chromium
+        run: |
+          dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
+          dotnet build tests/BomLocalService.Tests/BomLocalService.Tests.csproj --configuration Release --no-restore
+          pwsh tests/BomLocalService.Tests/bin/Release/net10.0/playwright.ps1 install chromium
+
+      - name: Build and start service
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t bom-local-service:demo .
+          cache="$(mktemp -d)"
+          docker run -d --name bom-demo --publish 127.0.0.1:18084:8080 \
+            --mount "type=bind,source=$cache,target=/app/cache" \
+            --shm-size=1g --env DEBUG__ENABLED=false bom-local-service:demo
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:18084/api/health >/dev/null && break
+            sleep 2
+          done
+
+      - name: Run deterministic demo browser test
+        env:
+          BOM_DEMO_BASE_URL: http://127.0.0.1:18084
+        run: |
+          dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
+            --configuration Release --no-build \
+            --filter "FullyQualifiedName~DemoBrowserTests" \
+            --logger trx --results-directory artifacts/demo-results
+
+      - name: Stop service
+        if: always()
+        run: docker rm -f bom-demo >/dev/null 2>&1 || true
+
+      - name: Upload demo results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-browser-results
+          path: artifacts/demo-results

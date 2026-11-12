@@ -1,70 +1,92 @@
 using BomLocalService.Extensions;
+using BomLocalService.Services;
 using BomLocalService.Services.Interfaces;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container
-// AddControllersWithViews includes AddControllers, so we use it for both MVC and API controllers
 builder.Services.AddControllersWithViews();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddHealthChecks();
 
-// Configure CORS - MUST be added before other services
 builder.Services.AddCorsConfiguration(builder.Configuration);
 
-// Register all services via assembly scanning
+// Register all services via assembly scanning. Services with explicit ownership
+// (refresh queue, capture boundary, clock and location state) are registered below
+// and deliberately do not implement the automatic-registration markers.
 builder.Services.ScanAndRegisterServices(typeof(Program).Assembly);
+
+builder.Services.AddSingleton<IClock, SystemClock>();
+builder.Services.AddSingleton<ILocationStateStore, LocationStateStore>();
+builder.Services.AddSingleton<IRadarCaptureService, RadarCaptureService>();
+
+// The queue, worker and hosted service must be the same instance.
+builder.Services.AddSingleton<CacheRefreshService>();
+builder.Services.AddSingleton<ICacheRefreshQueue>(sp => sp.GetRequiredService<CacheRefreshService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<CacheRefreshService>());
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline
-// HTTPS redirection is optional and disabled by default for Docker flexibility
-// Users can enable it by setting EnableHttpsRedirection=true in appsettings.json or ENABLEHTTPSREDIRECTION=true environment variable
 var enableHttpsRedirection = builder.Configuration.GetValue<bool>("EnableHttpsRedirection", false);
 if (enableHttpsRedirection)
 {
     app.UseHttpsRedirection();
 }
 
-// Enable routing (required for CORS to work with controllers)
 app.UseRouting();
-
-// Static files (for wwwroot assets like CSS, JS, images)
 app.UseStaticFiles();
-
-// CORS middleware - MUST be after UseRouting but before MapControllers
 app.UseCors();
 
-// No authorization required - service is designed to run behind a reverse proxy if auth is needed
-
-// Map MVC routes first (before API routes to avoid conflicts)
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=RadarTest}/{action=Index}/{suburb?}/{state?}");
 
-// Map API controllers (with /api prefix)
 app.MapControllers();
 
-// Map health check endpoint for Docker health monitoring
+// Liveness remains a process check. It never contacts BOM.
 app.MapHealthChecks("/api/health");
 
-// Cleanup incomplete cache folders from previous crashes/restarts before starting services
+// Readiness checks only local prerequisites. An empty cache is ready; an
+// upstream outage must not restart the container.
+app.MapGet("/api/ready", (ICacheRefreshQueue refreshQueue, ICacheService cacheService) =>
+{
+    var checks = new Dictionary<string, bool>();
+    string? cacheError = null;
+
+    try
+    {
+        var cacheDirectory = cacheService.GetCacheDirectory();
+        Directory.CreateDirectory(cacheDirectory);
+        var probe = Path.Combine(cacheDirectory, $".readiness-{Guid.NewGuid():N}.tmp");
+        File.WriteAllText(probe, "ok");
+        File.Delete(probe);
+        checks["cacheWritable"] = true;
+    }
+    catch (Exception ex)
+    {
+        checks["cacheWritable"] = false;
+        cacheError = ex.GetType().Name;
+    }
+
+    checks["refreshWorker"] = refreshQueue.IsRunning;
+    var ready = checks.Values.All(value => value);
+
+    return Results.Json(new
+    {
+        status = ready ? "ready" : "not_ready",
+        checks,
+        queueDepth = refreshQueue.QueueDepth,
+        cacheError,
+        timestamp = DateTime.UtcNow
+    }, statusCode: ready ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable);
+});
+
 var cacheService = app.Services.GetRequiredService<ICacheService>();
 var deletedCount = cacheService.CleanupIncompleteCacheFolders();
 if (deletedCount > 0)
 {
-    var logger = app.Services.GetRequiredService<ILogger<Program>>();
-    logger.LogInformation("Startup recovery: cleaned up {Count} incomplete cache folder(s) from previous session", deletedCount);
+    app.Logger.LogInformation("Startup recovery: cleaned up {Count} incomplete cache artifact(s)", deletedCount);
 }
 
-// Cleanup on shutdown
-app.Lifetime.ApplicationStopped.Register(() =>
-{
-    var service = app.Services.GetService<IBomRadarService>();
-    if (service is IDisposable disposable)
-    {
-        disposable.Dispose();
-    }
-});
-
 app.Run();
+
+public partial class Program { }

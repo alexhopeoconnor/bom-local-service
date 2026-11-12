@@ -1,10 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <Version>0.0.6</Version>
+    <Version>0.1.1</Version>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>
@@ -13,6 +15,17 @@
              CopyToPublishDirectory="Never" />
     <None Update="**/appsettings.Local.json;**/appsettings.local.json;**/appsettings.Overrides.json;**/appsettings.*.local.json"
           CopyToPublishDirectory="Never" />
+    <Content Update="global.json" CopyToPublishDirectory="Never" />
+    <None Update="global.json" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+
+  <!-- Keep the application project at the repository root from compiling or publishing tests,
+       fixtures, verification artifacts, or the runtime cache. -->
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <Content Remove="tests/**;artifacts/**;cache/**" />
+    <EmbeddedResource Remove="tests/**;artifacts/**;cache/**" />
+    <None Remove="tests/**;artifacts/**;cache/**" />
   </ItemGroup>
 
   <ItemGroup>

@@ -164,6 +164,11 @@ export function updateStatusForCacheUpdate(retryAfter) {
  * Update UI with radar data (main update function)
  */
 export function updateUI(data) {
+    // Preserve the collection the user was viewing so a shorter replacement
+    // can clamp the selected index and keep the same observation when possible.
+    state.previousFrames = Array.isArray(state.frames) ? state.frames.slice() : [];
+    state.previousFrameIndex = state.currentFrameIndex;
+
     // Update cache status even if no frames are available
     if (data) {
         const statusEl = getElement('cache-status');
@@ -171,6 +176,8 @@ export function updateUI(data) {
             let statusHtml = '';
             if (data.isUpdating) {
                 statusHtml = 'Updating <span class="status-badge status-updating">IN PROGRESS</span>';
+            } else if (data.updateFailed) {
+                statusHtml = 'Stale <span class="status-badge status-invalid">RETRYING</span>';
             } else if (data.cacheIsValid) {
                 statusHtml = 'Valid <span class="status-badge status-valid">ACTIVE</span>';
             } else {
@@ -183,7 +190,13 @@ export function updateUI(data) {
         const updateStatusDetailEl = getElement('update-status-detail');
         const estimationNoteEl = getElement('estimation-note');
         if (updateStatusDetailEl && (data.isUpdating !== undefined || data.cacheIsValid !== undefined)) {
-            if (data.isUpdating) {
+            if (data.updateFailed && !data.isUpdating) {
+                updateStatusDetailEl.textContent = 'Last update failed' +
+                    (data.errorCode ? ` (${data.errorCode})` : '') +
+                    (data.nextRetryAt ? ` • Retry after ${formatDate(data.nextRetryAt)} (${getRelativeTime(data.nextRetryAt)})` : '');
+                updateStatusDetailEl.title = data.error || '';
+                if (estimationNoteEl) estimationNoteEl.style.display = 'none';
+            } else if (data.isUpdating) {
                 if (data.nextUpdateTime) {
                     const relativeTime = getRelativeTime(data.nextUpdateTime);
                     updateStatusDetailEl.textContent = 'Update in progress • Estimated completion: ' + formatDate(data.nextUpdateTime) + ' (' + relativeTime + ')';
@@ -270,12 +283,23 @@ export function updateUI(data) {
         setElementText('last-refresh', 'Last checked: ' + formatDate(state.lastRefreshTime.toISOString()));
         
         state.nextClientCheckTime = new Date(state.lastRefreshTime.getTime() + (state.settings.refreshInterval * 1000));
+        if (data.nextRetryAt) {
+            const retryTime = new Date(data.nextRetryAt);
+            if (!isNaN(retryTime.getTime()) && retryTime > state.nextClientCheckTime) {
+                state.nextClientCheckTime = retryTime;
+            }
+        }
         const nextCheckEl = getElement('next-client-check');
         if (nextCheckEl) {
             nextCheckEl.textContent = 'Next check: ' + formatDate(state.nextClientCheckTime.toISOString()) + ' (' + getRelativeTime(state.nextClientCheckTime.toISOString()) + ')';
         }
     }
     
+    // Clamp the selected index to the replacement collection.
+    if (state.currentFrameIndex < 0 || state.currentFrameIndex >= state.frames.length) {
+        state.currentFrameIndex = state.frames.length > 0 ? state.frames.length - 1 : 0;
+    }
+
     // Frame controls will be built by the caller (to avoid circular dependencies)
 }
 

@@ -1,24 +1,29 @@
+using BomLocalService.Models;
+
 namespace BomLocalService.Utilities;
 
 public static class ValidationHelper
 {
     /// <summary>
-    /// Validates suburb and state parameters
-    /// Returns error message if validation fails, null if valid
+    /// Validates and normalizes suburb and state parameters.
+    /// Returns an error message if validation fails, or null and a LocationId if valid.
     /// </summary>
-    public static string? ValidateLocation(string suburb, string state)
+    public static string? TryValidateLocation(string? suburb, string? state, out LocationId? location)
     {
-        if (string.IsNullOrWhiteSpace(suburb))
+        if (!LocationId.TryCreate(suburb, state, out location, out var error))
         {
-            return "Suburb is required";
-        }
-
-        if (string.IsNullOrWhiteSpace(state))
-        {
-            return "State is required";
+            return error;
         }
 
         return null;
     }
-}
 
+    /// <summary>
+    /// Validates suburb and state parameters.
+    /// Returns an error message if validation fails, null if valid.
+    /// </summary>
+    public static string? ValidateLocation(string suburb, string state)
+    {
+        return TryValidateLocation(suburb, state, out _);
+    }
+}

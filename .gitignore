@@ -47,6 +47,8 @@ cache/
 project.lock.json
 project.fragment.lock.json
 artifacts/
+tests/**/TestResults/
+verification-output/
 
 ## Test results
 [Tt]est[Rr]esult*/

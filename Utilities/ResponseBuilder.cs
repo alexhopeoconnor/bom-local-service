@@ -45,21 +45,27 @@ public static class ResponseBuilder
         bool? cacheIsValid = null,
         DateTime? cacheExpiresAt = null,
         bool isUpdating = false,
-        int? estimatedUpdateDurationSeconds = null)
+        int? estimatedUpdateDurationSeconds = null,
+        string? cacheFolderName = null)
     {
         var folderInfo = new DirectoryInfo(cacheFolderPath);
         var lastWriteTime = folderInfo.Exists 
             ? folderInfo.LastWriteTime 
             : DateTime.UtcNow;
 
-        // Generate URLs for each frame if suburb and state are provided
+        // Generate URLs for each frame if suburb and state are provided.
+        // The cacheFolder query identifies the exact snapshot, preventing a
+        // concurrent refresh from mixing images with different metadata.
         if (!string.IsNullOrEmpty(suburb) && !string.IsNullOrEmpty(state))
         {
             var encodedSuburb = Uri.EscapeDataString(suburb);
             var encodedState = Uri.EscapeDataString(state);
+            var cacheFolderQuery = string.IsNullOrEmpty(cacheFolderName)
+                ? string.Empty
+                : $"?cacheFolder={Uri.EscapeDataString(cacheFolderName)}";
             foreach (var frame in frames)
             {
-                frame.ImageUrl = $"/api/radar/{encodedSuburb}/{encodedState}/frame/{frame.FrameIndex}";
+                frame.ImageUrl = $"/api/radar/{encodedSuburb}/{encodedState}/frame/{frame.FrameIndex}{cacheFolderQuery}";
             }
         }
 

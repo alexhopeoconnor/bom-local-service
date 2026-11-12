@@ -15,7 +15,7 @@ public class RadarController : ControllerBase
     private readonly ILogger<RadarController> _logger;
 
     public RadarController(
-        IBomRadarService bomRadarService, 
+        IBomRadarService bomRadarService,
         ICacheService cacheService,
         IConfiguration configuration,
         ILogger<RadarController> logger)
@@ -26,400 +26,348 @@ public class RadarController : ControllerBase
         _logger = logger;
     }
 
-    /// <summary>
-    /// Get radar data for a location. Returns JSON with all frames and their URLs. Triggers background update if cache is stale.
-    /// </summary>
     [HttpGet("{suburb}/{state}")]
-    public async Task<ActionResult<RadarResponse>> GetRadar(string suburb, string state, CancellationToken cancellationToken = default)
+    public async Task<ActionResult<RadarResponse>> GetRadar(
+        string suburb,
+        string state,
+        CancellationToken cancellationToken = default)
     {
+        if (!TryGetLocation(suburb, state, out var location, out var error))
+        {
+            return error!;
+        }
+
         try
         {
-            var validationError = ValidationHelper.ValidateLocation(suburb, state);
-            if (validationError != null)
-            {
-                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
-            }
+            var triggerStatus = await _bomRadarService.TriggerCacheUpdateAsync(
+                location!,
+                RefreshRequestSource.Api,
+                cancellationToken);
 
-            // Check if cache needs updating and trigger if needed (non-blocking)
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await _bomRadarService.TriggerCacheUpdateAsync(suburb, state, CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Background cache update failed for {Suburb}, {State}", suburb, state);
-                }
-            });
-
-            // Return cached radar data if available (no waiting)
-            var result = await _bomRadarService.GetCachedRadarAsync(suburb, state, cancellationToken);
-            
+            var result = await _bomRadarService.GetCachedRadarAsync(location!, cancellationToken);
             if (result == null || result.Frames.Count == 0)
             {
-                // Get cache status to include in 404 response
-                // Use cache service directly since this is cache management, not radar-specific
-                var cacheExpirationMinutesConfig = _configuration.GetValue<double?>("CacheExpirationMinutes");
-                if (!cacheExpirationMinutesConfig.HasValue)
+                var status = await _bomRadarService.GetCacheStatusAsync(location!, cancellationToken);
+                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(
+                    location!.Suburb,
+                    location.State,
+                    status,
+                    status.UpdateTriggered || triggerStatus.UpdateTriggered);
+
+                if (status.UpdateFailed)
                 {
-                    throw new InvalidOperationException("CacheExpirationMinutes configuration is required. Set it in appsettings.json or via CACHEEXPIRATIONMINUTES environment variable.");
-                }
-                var cacheExpirationMinutes = (int)cacheExpirationMinutesConfig.Value;
-                
-                var cacheManagementCheckIntervalMinutesConfig = _configuration.GetValue<int?>("CacheManagement:CheckIntervalMinutes");
-                if (!cacheManagementCheckIntervalMinutesConfig.HasValue)
-                {
-                    throw new InvalidOperationException("CacheManagement:CheckIntervalMinutes configuration is required. Set it in appsettings.json or via CACHEMANAGEMENT__CHECKINTERVALMINUTES environment variable.");
-                }
-                var cacheManagementCheckIntervalMinutes = cacheManagementCheckIntervalMinutesConfig.Value;
-                var cacheStatus = await _cacheService.GetCacheStatusAsync(
-                    suburb, 
-                    state, 
-                    CachedDataType.Radar,
-                    cacheExpirationMinutes,
-                    cacheManagementCheckIntervalMinutes,
-                    cancellationToken);
-                
-                // Determine if update was triggered (check if it's already in progress or was just triggered)
-                var updateTriggered = cacheStatus.UpdateTriggered || 
-                                     (cacheStatus.Message?.Contains("in progress") ?? false) ||
-                                     (!cacheStatus.CacheExists && !cacheStatus.CacheIsValid);
-                
-                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(suburb, state, cacheStatus, updateTriggered);
-                
-                // Enhance message based on cache status
-                if (cacheStatus.UpdateFailed)
-                {
-                    errorResponse.Message = $"No cached data found. Previous update attempt failed: {cacheStatus.Error ?? "Unknown error"}. Retrying...";
+                    errorResponse.Message = $"No cached data found. Previous update attempt failed: {status.Error ?? "Unknown error"}. Retrying is bounded by the retry schedule.";
                     errorResponse.Details!["previousUpdateFailed"] = true;
-                    if (cacheStatus.Error != null)
+                    if (status.Error != null)
                     {
-                        errorResponse.Details!["previousError"] = cacheStatus.Error;
+                        errorResponse.Details["previousError"] = status.Error;
                     }
-                    if (cacheStatus.ErrorCode != null)
+                    if (status.ErrorCode != null)
                     {
-                        errorResponse.Details!["previousErrorCode"] = cacheStatus.ErrorCode;
+                        errorResponse.Details["previousErrorCode"] = status.ErrorCode;
+                    }
+                    if (status.NextRetryAt.HasValue)
+                    {
+                        errorResponse.Details["nextRetryAt"] = status.NextRetryAt.Value;
                     }
                 }
-                else if (cacheStatus.Message?.Contains("in progress") ?? false)
+                else if (status.IsUpdating)
                 {
                     errorResponse.Message = "No cached data found. Cache update is currently in progress. Please retry shortly.";
                 }
-                else if (!cacheStatus.CacheExists)
+                else if (!status.CacheExists)
                 {
                     errorResponse.Message = "No cached data found for this location (fresh start). Cache update has been triggered in background. Please retry in a few moments.";
                 }
-                
+
+                if (!string.IsNullOrEmpty(triggerStatus.RejectionCode))
+                {
+                    errorResponse.Details!["refreshRejected"] = triggerStatus.RejectionCode;
+                    if (triggerStatus.RetryAfterSeconds.HasValue)
+                    {
+                        errorResponse.Details["retryAfterSeconds"] = triggerStatus.RetryAfterSeconds.Value;
+                    }
+                }
+
                 return NotFound(errorResponse);
             }
-            
-            // Generate URLs for frames if not already set
-            if (result.Frames.Any(f => string.IsNullOrEmpty(f.ImageUrl)))
-            {
-                foreach (var frame in result.Frames)
-                {
-                    frame.ImageUrl = $"/api/radar/{Uri.EscapeDataString(suburb)}/{Uri.EscapeDataString(state)}/frame/{frame.FrameIndex}";
-                }
-            }
-            
+
             return Ok(result);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting cached radar screenshots for suburb: {Suburb}, state: {State}", suburb, state);
+            _logger.LogError(ex, "Error getting cached radar screenshots for suburb: {Suburb}, state: {State}", location!.Suburb, location.State);
             var errorResponse = ApiErrorResponseBuilder.InternalError(
-                "An error occurred while getting the radar screenshots", 
+                "An error occurred while getting the radar screenshots",
                 ex);
-            errorResponse.Details!["location"] = new { suburb, state };
+            errorResponse.Details!["location"] = new { suburb = location.Suburb, state = location.State };
             return StatusCode(500, errorResponse);
         }
     }
 
-    /// <summary>
-    /// Get a specific frame image for a location.
-    /// </summary>
     [HttpGet("{suburb}/{state}/frame/{frameIndex}")]
-    public async Task<ActionResult> GetFrame(string suburb, string state, int frameIndex, CancellationToken cancellationToken = default)
+    public async Task<ActionResult> GetFrame(
+        string suburb,
+        string state,
+        int frameIndex,
+        CancellationToken cancellationToken = default)
     {
+        if (!TryGetLocation(suburb, state, out var location, out var error))
+        {
+            return error!;
+        }
+
+        var frameCount = CacheHelper.GetFrameCountForDataType(_configuration, CachedDataType.Radar);
+        if (frameIndex < 0 || frameIndex >= frameCount)
+        {
+            return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                $"Frame index must be between 0 and {frameCount - 1}, got {frameIndex}",
+                "frameIndex"));
+        }
+
+        var cacheFolder = Request.Query["cacheFolder"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(cacheFolder) &&
+            !LocationHelper.TryParseCacheFolderName(cacheFolder, out _))
+        {
+            return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                "cacheFolder must be a recognised cache folder basename without path separators",
+                "cacheFolder"));
+        }
+
         try
         {
-            var validationError = ValidationHelper.ValidateLocation(suburb, state);
-            if (validationError != null)
-            {
-                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
-            }
-            
-            // Validate frame index
-            if (frameIndex < 0 || frameIndex > 6)
-            {
-                return BadRequest(ApiErrorResponseBuilder.ValidationError(
-                    $"Frame index must be between 0 and 6, got {frameIndex}", 
-                    "frameIndex"));
-            }
-            
             RadarFrame? frame;
-            
-            // Support cacheFolder query parameter for historical data
-            var cacheFolder = Request.Query["cacheFolder"].FirstOrDefault();
             if (!string.IsNullOrEmpty(cacheFolder))
             {
-                frame = await _bomRadarService.GetFrameFromCacheFolderAsync(suburb, state, cacheFolder, frameIndex, cancellationToken);
+                if (!LocationHelper.TryParseCacheFolderName(cacheFolder, out var folderLocation) ||
+                    !folderLocation!.Location.Equals(location!))
+                {
+                    return NotFound(ApiErrorResponseBuilder.NotFound(
+                        "Frame",
+                        $"Frame {frameIndex} for {location!.Suburb}, {location.State}",
+                        "The cache folder does not belong to the requested location."));
+                }
+
+                frame = await _bomRadarService.GetFrameFromCacheFolderAsync(
+                    location!,
+                    cacheFolder,
+                    frameIndex,
+                    cancellationToken);
             }
             else
             {
-                frame = await _bomRadarService.GetCachedFrameAsync(suburb, state, frameIndex, cancellationToken);
+                frame = await _bomRadarService.GetCachedFrameAsync(location!, frameIndex, cancellationToken);
             }
-            
+
             if (frame == null || !System.IO.File.Exists(frame.ImagePath))
             {
                 var errorResponse = ApiErrorResponseBuilder.NotFound(
-                    "Frame", 
-                    $"Frame {frameIndex} for {suburb}, {state}",
+                    "Frame",
+                    $"Frame {frameIndex} for {location!.Suburb}, {location.State}",
                     "The frame may not exist yet. Try refreshing the cache or checking if cache update is in progress.");
                 errorResponse.Details!["frameIndex"] = frameIndex;
-                errorResponse.Details!["location"] = new { suburb, state };
+                errorResponse.Details["location"] = new { suburb = location.Suburb, state = location.State };
                 if (!string.IsNullOrEmpty(cacheFolder))
                 {
                     errorResponse.Details["cacheFolder"] = cacheFolder;
                 }
+
                 return NotFound(errorResponse);
             }
-            
+
             var imageBytes = await System.IO.File.ReadAllBytesAsync(frame.ImagePath, cancellationToken);
             return File(imageBytes, "image/png", $"frame_{frameIndex}.png");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting frame {FrameIndex} for suburb: {Suburb}, state: {State}", frameIndex, suburb, state);
+            _logger.LogError(ex, "Error getting frame {FrameIndex} for suburb: {Suburb}, state: {State}", frameIndex, location!.Suburb, location.State);
             var errorResponse = ApiErrorResponseBuilder.InternalError(
-                "An error occurred while getting the frame", 
+                "An error occurred while getting the frame",
                 ex);
             errorResponse.Details!["frameIndex"] = frameIndex;
-            errorResponse.Details!["location"] = new { suburb, state };
+            errorResponse.Details["location"] = new { suburb = location.Suburb, state = location.State };
             return StatusCode(500, errorResponse);
         }
     }
 
-    /// <summary>
-    /// Get metadata about the cached radar data for a location (observation time, forecast time, etc.)
-    /// </summary>
     [HttpGet("{suburb}/{state}/metadata")]
-    public async Task<ActionResult<LastUpdatedInfo>> GetMetadata(string suburb, string state, CancellationToken cancellationToken = default)
+    public async Task<ActionResult<LastUpdatedInfo>> GetMetadata(
+        string suburb,
+        string state,
+        CancellationToken cancellationToken = default)
     {
+        if (!TryGetLocation(suburb, state, out var location, out var error))
+        {
+            return error!;
+        }
+
         try
         {
-            var validationError = ValidationHelper.ValidateLocation(suburb, state);
-            if (validationError != null)
-            {
-                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
-            }
-
-            var result = await _bomRadarService.GetLastUpdatedInfoAsync(suburb, state, cancellationToken);
-            
+            var result = await _bomRadarService.GetLastUpdatedInfoAsync(location!, cancellationToken);
             if (result == null)
             {
                 var errorResponse = ApiErrorResponseBuilder.NotFound(
-                    "Metadata", 
-                    $"{suburb}, {state}",
+                    "Metadata",
+                    $"{location!.Suburb}, {location.State}",
                     "Use POST /api/cache/{suburb}/{state}/refresh to trigger cache update.");
-                errorResponse.Details!["location"] = new { suburb, state };
+                errorResponse.Details!["location"] = new { suburb = location.Suburb, state = location.State };
                 errorResponse.Suggestions = new Dictionary<string, object>
                 {
                     { "action", "refresh_cache" },
-                    { "refreshEndpoint", $"/api/cache/{Uri.EscapeDataString(suburb)}/{Uri.EscapeDataString(state)}/refresh" }
+                    { "refreshEndpoint", $"/api/cache/{Uri.EscapeDataString(location.Suburb)}/{Uri.EscapeDataString(location.State)}/refresh" }
                 };
                 return NotFound(errorResponse);
             }
-            
+
             return Ok(result);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting metadata for suburb: {Suburb}, state: {State}", suburb, state);
+            _logger.LogError(ex, "Error getting metadata for suburb: {Suburb}, state: {State}", location!.Suburb, location.State);
             var errorResponse = ApiErrorResponseBuilder.InternalError(
-                "An error occurred while getting metadata", 
+                "An error occurred while getting metadata",
                 ex);
-            errorResponse.Details!["location"] = new { suburb, state };
+            errorResponse.Details!["location"] = new { suburb = location.Suburb, state = location.State };
             return StatusCode(500, errorResponse);
         }
     }
 
-    /// <summary>
-    /// Get historical radar data (frames from multiple cache folders) between specified timestamps.
-    /// Radar frames can be joined across cache folders because they represent a historical time series.
-    /// </summary>
     [HttpGet("{suburb}/{state}/timeseries")]
     public async Task<ActionResult<RadarTimeSeriesResponse>> GetRadarTimeSeries(
-        string suburb, 
-        string state, 
-        [FromQuery] string? startTime = null, 
+        string suburb,
+        string state,
+        [FromQuery] string? startTime = null,
         [FromQuery] string? endTime = null,
         CancellationToken cancellationToken = default)
     {
+        if (!TryGetLocation(suburb, state, out var location, out var error))
+        {
+            return error!;
+        }
+
+        if (!TryParseBound(startTime, "startTime", out var start, out var boundError))
+        {
+            return BadRequest(boundError);
+        }
+
+        if (!TryParseBound(endTime, "endTime", out var end, out boundError))
+        {
+            return BadRequest(boundError);
+        }
+
+        if (start.HasValue && end.HasValue && start.Value > end.Value)
+        {
+            return BadRequest(ApiErrorResponseBuilder.ValidationError(
+                "startTime must be before or equal to endTime",
+                "timeRange"));
+        }
+
+        var cacheRetentionHours = _configuration.GetValue<int?>("CacheRetentionHours")
+            ?? throw new InvalidOperationException("CacheRetentionHours configuration is required.");
+        var configuredMaxHours = _configuration.GetValue<int?>("TimeSeries:MaxTimeRangeHours");
+        var maxTimeRangeHours = configuredMaxHours ?? Math.Max(cacheRetentionHours, 24);
+
+        if (start.HasValue && end.HasValue)
+        {
+            var timeRange = end.Value - start.Value;
+            if (timeRange.TotalHours > maxTimeRangeHours)
+            {
+                var reason = configuredMaxHours.HasValue
+                    ? $"configured limit: {configuredMaxHours} hours"
+                    : $"cache retention: {cacheRetentionHours} hours";
+
+                return BadRequest(ApiErrorResponseBuilder.TimeRangeError(
+                    $"Time range exceeds maximum allowed duration of {maxTimeRangeHours} hours (based on {reason}). Please specify a smaller range.",
+                    null,
+                    new { start = start.Value, end = end.Value, requestedHours = timeRange.TotalHours }));
+            }
+        }
+
         try
         {
-            var validationError = ValidationHelper.ValidateLocation(suburb, state);
-            if (validationError != null)
+            var cacheRange = await _bomRadarService.GetCacheRangeAsync(location!, cancellationToken);
+            if (cacheRange.TotalCacheFolders == 0)
             {
-                return BadRequest(ApiErrorResponseBuilder.ValidationError(validationError));
-            }
-
-            DateTime? start = null;
-            DateTime? end = null;
-            
-            if (!string.IsNullOrEmpty(startTime))
-            {
-                if (!DateTime.TryParse(startTime, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedStart))
-                {
-                    return BadRequest(ApiErrorResponseBuilder.ValidationError(
-                        "Invalid startTime format. Use ISO 8601 format (e.g., 2025-12-07T00:00:00Z)", 
-                        "startTime"));
-                }
-                start = parsedStart.ToUniversalTime();
-            }
-            
-            if (!string.IsNullOrEmpty(endTime))
-            {
-                if (!DateTime.TryParse(endTime, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsedEnd))
-                {
-                    return BadRequest(ApiErrorResponseBuilder.ValidationError(
-                        "Invalid endTime format. Use ISO 8601 format (e.g., 2025-12-07T12:00:00Z)", 
-                        "endTime"));
-                }
-                end = parsedEnd.ToUniversalTime();
-            }
-            
-            if (start.HasValue && end.HasValue && start.Value > end.Value)
-            {
-                return BadRequest(ApiErrorResponseBuilder.ValidationError(
-                    "startTime must be before or equal to endTime",
-                    "timeRange"));
-            }
-
-            // Validate time range size to prevent excessive data loading
-            // Default: base limit on cache retention, but allow override via config
-            var cacheRetentionHoursConfig = _configuration.GetValue<int?>("CacheRetentionHours");
-            if (!cacheRetentionHoursConfig.HasValue)
-            {
-                throw new InvalidOperationException("CacheRetentionHours configuration is required. Set it in appsettings.json or via CACHERETENTIONHOURS environment variable.");
-            }
-            var cacheRetentionHours = cacheRetentionHoursConfig.Value;
-            
-            // TimeSeries:MaxTimeRangeHours is optional (nullable)
-            var configuredMaxHours = _configuration.GetValue<int?>("TimeSeries:MaxTimeRangeHours");
-            
-            // Use configured value if set, otherwise use cache retention (with minimum of 24 hours)
-            var maxTimeRangeHours = configuredMaxHours ?? Math.Max(cacheRetentionHours, 24);
-            
-            if (start.HasValue && end.HasValue)
-            {
-                var timeRange = end.Value - start.Value;
-                if (timeRange.TotalHours > maxTimeRangeHours)
-                {
-                    var reason = configuredMaxHours.HasValue 
-                        ? $"configured limit: {configuredMaxHours} hours"
-                        : $"cache retention: {cacheRetentionHours} hours";
-                    
-                    return BadRequest(ApiErrorResponseBuilder.TimeRangeError(
-                        $"Time range exceeds maximum allowed duration of {maxTimeRangeHours} hours (based on {reason}). Please specify a smaller range.",
-                        null,
-                        new { start = start.Value, end = end.Value, requestedHours = timeRange.TotalHours }));
-                }
-            }
-
-            // Check if location has any cache at all (to distinguish from "no data in range")
-            var cacheRange = await _bomRadarService.GetCacheRangeAsync(suburb, state, cancellationToken);
-            var locationHasCache = cacheRange.TotalCacheFolders > 0;
-
-            // If no cache exists for this location, trigger background update and return detailed 404
-            if (!locationHasCache)
-            {
-                // Trigger background cache update (non-blocking)
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await _bomRadarService.TriggerCacheUpdateAsync(suburb, state, CancellationToken.None);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Background cache update failed for {Suburb}, {State}", suburb, state);
-                    }
-                });
-
-                // Get cache status to include in 404 response
-                var cacheExpirationMinutesConfig = _configuration.GetValue<double?>("CacheExpirationMinutes");
-                if (!cacheExpirationMinutesConfig.HasValue)
-                {
-                    throw new InvalidOperationException("CacheExpirationMinutes configuration is required. Set it in appsettings.json or via CACHEEXPIRATIONMINUTES environment variable.");
-                }
-                var cacheExpirationMinutes = (int)cacheExpirationMinutesConfig.Value;
-                
-                var cacheManagementCheckIntervalMinutesConfig = _configuration.GetValue<int?>("CacheManagement:CheckIntervalMinutes");
-                if (!cacheManagementCheckIntervalMinutesConfig.HasValue)
-                {
-                    throw new InvalidOperationException("CacheManagement:CheckIntervalMinutes configuration is required. Set it in appsettings.json or via CACHEMANAGEMENT__CHECKINTERVALMINUTES environment variable.");
-                }
-                var cacheManagementCheckIntervalMinutes = cacheManagementCheckIntervalMinutesConfig.Value;
-                var cacheStatus = await _cacheService.GetCacheStatusAsync(
-                    suburb, 
-                    state, 
-                    CachedDataType.Radar,
-                    cacheExpirationMinutes,
-                    cacheManagementCheckIntervalMinutes,
-                    cancellationToken);
-                
-                var updateTriggered = cacheStatus.UpdateTriggered || 
-                                     (cacheStatus.Message?.Contains("in progress") ?? false) ||
-                                     (!cacheStatus.CacheExists && !cacheStatus.CacheIsValid);
-                
-                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(suburb, state, cacheStatus, updateTriggered);
+                await _bomRadarService.TriggerCacheUpdateAsync(location!, RefreshRequestSource.Api, cancellationToken);
+                var status = await _bomRadarService.GetCacheStatusAsync(location!, cancellationToken);
+                var errorResponse = ApiErrorResponseBuilder.CacheNotFound(
+                    location!.Suburb,
+                    location.State,
+                    status,
+                    status.UpdateTriggered);
                 errorResponse.Message = "No cached data found for this location. Cache update has been triggered in background. Please retry in a few moments.";
                 errorResponse.Details!["requestedTimeRange"] = new { start, end };
-                
                 return NotFound(errorResponse);
             }
 
-            // Location has cache, check if there's data in the requested time range
-            var result = await _bomRadarService.GetRadarTimeSeriesAsync(suburb, state, start, end, cancellationToken);
-            
+            var result = await _bomRadarService.GetRadarTimeSeriesAsync(location!, start, end, cancellationToken);
             if (result.CacheFolders.Count == 0)
             {
-                // Location has cache, but no data in the requested time range
-                var oldestCache = cacheRange.OldestCache?.CacheTimestamp;
-                var newestCache = cacheRange.NewestCache?.CacheTimestamp;
-                
-                var availableRange = new {
-                    oldest = oldestCache,
-                    newest = newestCache,
+                var availableRange = new
+                {
+                    oldest = cacheRange.OldestCache?.CacheTimestamp,
+                    newest = cacheRange.NewestCache?.CacheTimestamp,
+                    oldestObservationTime = cacheRange.OldestObservationTime,
+                    newestObservationTime = cacheRange.NewestObservationTime,
                     totalCacheFolders = cacheRange.TotalCacheFolders,
                     timeSpanMinutes = cacheRange.TimeSpanMinutes
                 };
-                
-                var requestedRange = new {
-                    start = start,
-                    end = end
-                };
-                
+
                 return NotFound(ApiErrorResponseBuilder.TimeRangeError(
                     "No historical data found for the specified time range.",
                     availableRange,
-                    requestedRange));
+                    new { start, end }));
             }
-            
+
             return Ok(result);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error getting radar time series for suburb: {Suburb}, state: {State}", suburb, state);
+            _logger.LogError(ex, "Error getting radar time series for suburb: {Suburb}, state: {State}", location!.Suburb, location.State);
             var errorResponse = ApiErrorResponseBuilder.InternalError(
-                "An error occurred while getting radar time series", 
+                "An error occurred while getting radar time series",
                 ex);
-            errorResponse.Details!["location"] = new { suburb, state };
-            errorResponse.Details!["requestedTimeRange"] = new { startTime, endTime };
+            errorResponse.Details!["location"] = new { suburb = location.Suburb, state = location.State };
+            errorResponse.Details["requestedTimeRange"] = new { startTime, endTime };
             return StatusCode(500, errorResponse);
         }
     }
-}
 
+    private bool TryGetLocation(string suburb, string state, out LocationId? location, out ActionResult? error)
+    {
+        if (!LocationId.TryCreate(suburb, state, out location, out var message))
+        {
+            error = BadRequest(ApiErrorResponseBuilder.ValidationError(message!));
+            return false;
+        }
+
+        error = null;
+        return true;
+    }
+
+    private static bool TryParseBound(string? value, string field, out DateTime? bound, out ActionResult? error)
+    {
+        bound = null;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        if (!DateTimeOffset.TryParse(
+                value,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var parsed))
+        {
+            error = new BadRequestObjectResult(ApiErrorResponseBuilder.ValidationError(
+                $"Invalid {field} format. Use ISO 8601 format with an explicit or implicit offset (e.g., 2025-12-07T00:00:00Z)",
+                field));
+            return false;
+        }
+
+        bound = parsed.UtcDateTime;
+        return true;
+    }
+}

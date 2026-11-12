@@ -21,6 +21,10 @@
 **/secrets.dev.yaml
 **/values.dev.yaml
 cache/
+tests/
+artifacts/
+**/TestResults/
+**/*.trx
 LICENSE
 README.md
 

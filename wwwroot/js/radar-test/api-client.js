@@ -122,16 +122,19 @@ export async function fetchHistoricalRadar(startTime, endTime) {
         const data = await response.json();
         state.historicalData = data;
         
-        // Flatten all frames from all cache folders
-        const allFrames = [];
-        data.cacheFolders.forEach(cacheFolder => {
-            cacheFolder.frames.forEach(frame => {
-                frame.cacheTimestamp = cacheFolder.cacheTimestamp;
-                frame.observationTime = cacheFolder.observationTime;
-                frame.cacheFolderName = cacheFolder.cacheFolderName;
-                allFrames.push(frame);
-            });
-        });
+        // Flatten all frames, preserve their origin snapshot, and sort explicitly.
+        // Grouping by capture does not guarantee global order when captures overlap.
+        const allFrames = data.cacheFolders
+            .flatMap(cacheFolder => cacheFolder.frames.map(frame => ({
+                ...frame,
+                cacheTimestamp: cacheFolder.cacheTimestamp,
+                observationTime: cacheFolder.observationTime,
+                cacheFolderName: cacheFolder.cacheFolderName
+            })))
+            .sort((a, b) =>
+                Date.parse(a.absoluteObservationTime) -
+                Date.parse(b.absoluteObservationTime)
+            );
         
         // Filter out frames without absoluteObservationTime
         const invalidFrames = allFrames.filter(frame => !frame.absoluteObservationTime);
@@ -207,6 +210,22 @@ export async function fetchMetadata() {
 }
 
 /**
+ * Fetch operational location status (stale data, failure and retry guidance).
+ */
+export async function fetchLocationStatus() {
+    try {
+        const response = await fetch(`${API_BASE.replace('/api/radar', '/api/cache')}/status`, {
+            signal: AbortSignal.timeout(5000)
+        });
+        if (!response.ok) return null;
+        return await response.json();
+    } catch (error) {
+        console.debug('Could not fetch location status:', error);
+        return null;
+    }
+}
+
+/**
  * Fetch latest radar data (for latest mode)
  */
 export async function fetchLatestRadar() {
@@ -215,28 +234,35 @@ export async function fetchLatestRadar() {
     });
     
     if (!response.ok) {
-        const error = await response.json().catch(() => ({ message: `HTTP ${response.status}: ${response.statusText}` }));
-        
+        // Read the response body exactly once. Reading it twice loses the
+        // service's structured error details on the 404 path.
+        const errorData = await response.json().catch(() => ({
+            message: `HTTP ${response.status}: ${response.statusText}`
+        }));
+
         if (response.status === 404) {
-            const errorData = await response.json().catch(() => ({}));
             state.lastRefreshTime = new Date();
-            
+
             const refreshEndpoint = errorData.suggestions?.refreshEndpoint || errorData.refreshEndpoint;
             triggerBackgroundRefresh(refreshEndpoint);
-            
+
             const cacheStatusData = createCacheStatusData(errorData);
-            const retryAfter = errorData.suggestions?.retryAfter || errorData.retryAfter || 30;
-            const message = errorData.message || `Cache is being generated. Please wait ${retryAfter} seconds and refresh.`;
-            
+            const retryAfter = errorData.details?.retryAfterSeconds ||
+                errorData.suggestions?.retryAfter ||
+                errorData.retryAfter || 30;
+            const message = errorData.message ||
+                `Cache is being generated. Please wait ${retryAfter} seconds and refresh.`;
+
             return {
                 error: 'cache_generating',
                 cacheStatus: cacheStatusData,
                 message: message,
-                refreshEndpoint: refreshEndpoint
+                refreshEndpoint: refreshEndpoint,
+                retryAfter: retryAfter
             };
         }
-        
-        throw new Error(error.message || error.error || 'Failed to fetch radar data');
+
+        throw new Error(errorData.message || errorData.error || 'Failed to fetch radar data');
     }
     
     const data = await response.json();
@@ -369,6 +395,20 @@ export async function fetchRadarData() {
             if (result.error) {
                 return result;
             }
+
+            if (result.data && result.data.cacheIsValid === false) {
+                const status = await fetchLocationStatus();
+                if (status) {
+                    result.data.updateFailed = status.updateFailed === true;
+                    result.data.errorCode = status.errorCode || null;
+                    result.data.error = status.error || null;
+                    result.data.nextRetryAt = status.nextRetryAt || null;
+                    result.data.consecutiveFailures = status.consecutiveFailures || 0;
+                    result.data.isUpdating = result.data.isUpdating || status.isUpdating === true;
+                    result.data.nextUpdateTime = result.data.nextUpdateTime || status.nextUpdateTime || null;
+                }
+            }
+
             return result;
         }
     } catch (error) {
