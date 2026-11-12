@@ -1,0 +1,21 @@
+{
+  "updateTriggered": false,
+  "cacheExists": true,
+  "cacheIsValid": false,
+  "cacheExpiresAt": "2026-11-12T07:42:30Z",
+  "nextUpdateTime": "2026-11-12T07:46:00Z",
+  "message": "Last cache update failed",
+  "updateFailed": true,
+  "error": "Chromium failed during capture",
+  "errorCode": "BROWSER_ERROR",
+  "lastUpdateAttempt": "2026-11-12T07:44:00Z",
+  "consecutiveFailures": 1,
+  "nextRetryAt": "2026-11-12T07:46:00Z",
+  "lastSuccessfulCaptureAt": "2026-11-12T07:30:00Z",
+  "latestObservationAt": "2026-11-12T07:30:00Z",
+  "isUpdating": false,
+  "updateAccepted": false,
+  "rejectionCode": null,
+  "queueDepth": 0,
+  "retryAfterSeconds": 120
+}

@@ -6,6 +6,13 @@
 
 A local caching service for Australian Bureau of Meteorology (BOM) radar data, designed to provide a reliable API for Home Assistant integrations and other local services.
 
+**Development status (2026-11-13):** This checkout contains the **unreleased
+v0.1.1 candidate**. The architecture and API changes below describe that
+candidate; they are not yet available in a published v0.1.1 image. The latest
+GitHub release is [v0.0.6](https://github.com/alexhopeoconnor/bom-local-service/releases/tag/v0.0.6).
+See [candidate validation and limitations](#candidate-validation-and-limitations)
+before treating the candidate as release-qualified.
+
 ## Background
 
 The Australian Bureau of Meteorology's radar API endpoint (`https://api.weather.bom.gov.au/v1/radar/capabilities`) stopped working in December 2024, returning errors. This broke integrations like the popular [bom-radar-card](https://github.com/Makin-Things/bom-radar-card) for Home Assistant, which can no longer render due to the Cross-Origin Request Blocked error. 
@@ -31,12 +38,14 @@ This project was created to bridge that gap by:
 
 ## Architecture
 
-Built on ASP.NET Core 9.0, the service uses a service-oriented architecture with clear separation of concerns:
+Built on ASP.NET Core 10.0 (LTS), the service uses a service-oriented architecture with clear separation of concerns:
 
 ### Core Services
-- **BomRadarService**: Main orchestrator that coordinates cache operations, browser automation, and data retrieval
-- **CacheService**: Manages file-based storage of radar screenshots and metadata in organized directory structures
-- **BrowserService**: Handles Playwright browser automation for headless browser sessions
+- **BomRadarService**: Read orchestration, historical selection and refresh requests
+- **CacheService**: Snapshot validation, safe folder resolution, publication and metadata
+- **CacheRefreshService**: Single owner of the bounded refresh queue, deduplication, deadlines, retry backoff and status
+- **RadarCaptureService**: The browser/scraping capture boundary; writes only into a staging directory
+- **BrowserService**: Playwright browser lifecycle with disconnection detection and recreation
 - **ScrapingService**: Coordinates web scraping workflows (simplified orchestrator)
 - **SelectorService**: Finds page elements using configurable CSS selectors with fallback support
 - **TimeParsingService**: Parses and converts time formats from BOM data
@@ -57,8 +66,12 @@ The scraping system uses a **workflow-based architecture** with configurable ste
 - **Workflow Steps**: Individual steps within workflows can be enabled/disabled via configuration, providing flexibility for testing and troubleshooting
 
 ### Background Services
-- **CacheManagementService**: Periodically checks cache validity for all cached locations and triggers updates when data expires
-- **CacheCleanupService**: Removes cache files older than the configured retention period
+- **CacheRefreshService**: Hosted worker that owns refresh work independently of HTTP requests, with shutdown and capture-deadline cancellation. Browser setup and admission-race gaps remain under review.
+- **CacheManagementService**: Periodically requests refreshes for known locations through the same queue.
+- **CacheCleanupService**: Removes recognised expired snapshots while preserving the newest complete fallback per location and leaving unrecognised top-level directories alone.
+
+### Cache Publication
+A capture writes into `cache/.staging/` and passes metadata, frame-index and PNG-header checks before a same-filesystem rename into `cache/{Location}_{Timestamp}/`. Readers select metadata and frames from one snapshot. Full PNG decoding and malformed-metadata handling remain review gaps. Legacy complete folders without the new `.complete` marker remain readable.
 
 ### API Layer
 - **RadarController**: REST endpoints for accessing radar data (`/api/radar/{suburb}/{state}`)
@@ -73,19 +86,17 @@ Pre-built Docker images are available on GitHub Container Registry:
 
 **Image:** `ghcr.io/alexhopeoconnor/bom-local-service`
 
-**Multi-architecture support:** Images are built for both `linux/amd64` and `linux/arm64` platforms
+The candidate workflow targets `linux/amd64` and `linux/arm64`. Native
+qualification of the final candidate images is still outstanding.
 
-**Pull the latest version:**
+**Pull the published image:**
 ```bash
 docker pull ghcr.io/alexhopeoconnor/bom-local-service:latest
 ```
 
-**Pull a specific version:**
-```bash
-docker pull ghcr.io/alexhopeoconnor/bom-local-service:v0.0.1
-```
-
-See all available versions on the [releases page](https://github.com/alexhopeoconnor/bom-local-service/releases).
+`latest` is mutable and does not identify this local candidate. There is no
+published `v0.1.1` image yet. To test these changes, build the candidate locally
+as shown below. See published versions on the [releases page](https://github.com/alexhopeoconnor/bom-local-service/releases).
 
 ### Prerequisites
 
@@ -94,9 +105,10 @@ See all available versions on the [releases page](https://github.com/alexhopeoco
 
 ### Quick Start
 
-#### Option 1: Using Pre-built Docker Image (Recommended)
+#### Option 1: Using the Published Docker Image
 
-Pull the latest image from GitHub Container Registry:
+Use this path for the published service, whose behavior may differ from the
+candidate described in this README:
 
 ```bash
 docker pull ghcr.io/alexhopeoconnor/bom-local-service:latest
@@ -113,27 +125,28 @@ docker run -d \
   ghcr.io/alexhopeoconnor/bom-local-service:latest
 ```
 
-**Available tags:**
-- `latest` - Latest release
-- `v0.0.1` - Specific version (see [releases](https://github.com/alexhopeoconnor/bom-local-service/releases) for all versions)
+Record the resolved image digest when deploying so the same image can be
+selected again. Confirm version tags in the registry before using them.
 
-#### Option 2: Build from Source
+#### Option 2: Build the Candidate from Source
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/alexhopeoconnor/bom-local-service.git
-   cd bom-local-service
-   ```
+1. **Use a checkout containing the candidate changes**. A fresh clone starts
+   from the repository's published default branch; it does not include local,
+   unpushed candidate work. Run the following commands from the candidate
+   checkout's repository root.
 
 2. **Build the Docker image**:
    ```bash
-   docker build -t bom-local-service .
+   docker build -t bom-local-service:candidate .
    ```
 
    The build process uses a multi-stage Dockerfile:
-   - **Build stage**: Compiles the .NET application
-   - **Runtime stage**: Uses the official Playwright .NET image with browsers pre-installed
-   - Sets up a virtual display (Xvfb) for headless browser operation
+   - **Build stage**: .NET 10 SDK with locked package restore
+   - **Runtime stage**: Official Playwright .NET image with version-matched Chromium, plus ASP.NET Core 10
+   - Sets up a virtual display (Xvfb) for browser operation
+
+   Docker supplies the build SDK. Building directly with `dotnet` requires the
+   .NET 10 SDK selected by `global.json` (`10.0.100`, latest feature band).
 
 3. **Run the container**:
    ```bash
@@ -143,7 +156,7 @@ docker run -d \
      -v $(pwd)/cache:/app/cache \
      --shm-size=1gb \
      --ipc=host \
-     bom-local-service
+     bom-local-service:candidate
    ```
 
    **Note**: The `--shm-size=1gb` and `--ipc=host` flags are important for Playwright to function correctly in Docker.
@@ -152,26 +165,19 @@ docker run -d \
 
 The included `docker-compose.yml` provides a convenient way to run the service with all configuration options.
 
-**Using pre-built image (recommended):**
+**Using the published image:**
 
-Update `docker-compose.yml` to use the GitHub Container Registry image:
-```yaml
-services:
-  bom-local-service:
-    image: ghcr.io/alexhopeoconnor/bom-local-service:latest
-    # Remove or comment out the 'build:' section
+Override the candidate image name and explicitly disable the local build:
+```bash
+BOM_IMAGE=ghcr.io/alexhopeoconnor/bom-local-service:latest docker compose up -d --no-build --pull always
 ```
 
-Then run:
-```bash
-docker-compose up -d
-```
+**Building the local candidate:**
 
-**Building from source:**
-
-If you want to build locally, keep the `build:` section in `docker-compose.yml` and run:
+The checked-in Compose default names `v0.1.1`, which is not published yet.
+Use a local tag and build it explicitly:
 ```bash
-docker-compose up -d
+BOM_IMAGE=bom-local-service:candidate docker compose up -d --build
 ```
 
 **Mounting custom appsettings.json:**
@@ -498,7 +504,59 @@ The service provides RESTful API endpoints for accessing radar data and managing
 
 When running locally with default settings: `http://localhost:8082`
 
+### API and cache compatibility contract
+
+This table describes the intended compatibility contract. Automated tests cover
+the main paths; location and malformed-time-input gaps remain listed under
+[candidate validation and limitations](#candidate-validation-and-limitations).
+
+| Behaviour | Intended contract |
+| :-- | :-- |
+| Existing routes and JSON fields | Remain compatible |
+| Existing cache folders | Remain readable without renaming |
+| Location identity | Consistent casing/whitespace normalization |
+| State | Valid documented abbreviation, normalized consistently |
+| Historical bounds | Inclusive observation times, compared in UTC |
+| Missing historical bounds | Preserve existing optional-bound behaviour |
+| Invalid location, folder syntax, or range | Structured HTTP 400 |
+| Well-formed missing or wrong-location folder | HTTP 404 |
+| Empty historical result | Preserve the existing structured 404 behaviour |
+| Deletion during queued/running capture | Explicit HTTP 409 conflict, rather than racing the writer |
+| Frame indices | Validated against the relevant snapshot/configuration, without hard-coded `0..6` assumptions |
+
+Ordinary Australian place-name punctuation is retained, including apostrophes, hyphens, periods, spaces and Unicode letters. Cache folder names still use the historical `Suburb_State_YYYYMMDD_HHMMSS` convention (spaces become underscores); identity comparison normalizes case and whitespace without rewriting existing paths.
+
+`cacheFolders` grouping is preserved in historical responses for compatibility. Captures can overlap, so grouping by capture cannot guarantee global playback order. Consumers should flatten and sort by `absoluteObservationTime`:
+
+```javascript
+const frames = data.cacheFolders
+  .flatMap(folder =>
+    folder.frames.map(frame => ({
+      ...frame,
+      cacheFolderName: folder.cacheFolderName,
+    })))
+  .sort((a, b) =>
+    Date.parse(a.absoluteObservationTime) -
+    Date.parse(b.absoluteObservationTime)
+  );
+```
+
+Each frame URL includes `cacheFolder` so its origin snapshot is unambiguous.
+
 ### Endpoints
+
+#### Liveness and readiness
+
+- `GET /api/health` is process liveness only. It never contacts BOM and remains healthy during an upstream outage.
+- `GET /api/ready` checks local prerequisites only: cache writability and refresh-worker availability. An empty cache is ready; readiness never starts a scrape.
+
+```json
+{
+  "status": "ready",
+  "checks": { "cacheWritable": true, "refreshWorker": true },
+  "queueDepth": 0
+}
+```
 
 #### Get Radar Data
 
@@ -518,7 +576,7 @@ GET /api/radar/{suburb}/{state}
   "frames": [
     {
       "frameIndex": 0,
-      "imageUrl": "/api/radar/Brisbane/QLD/frame/0",
+      "imageUrl": "/api/radar/Brisbane/QLD/frame/0?cacheFolder=Brisbane_QLD_20250115_100000",
       "absoluteObservationTime": "2025-01-15T10:00:00Z"
     }
   ],
@@ -810,6 +868,12 @@ All API endpoints return standardized error responses using the `ApiErrorRespons
 - If no time range is specified, returns all available historical data
 - **Note**: `CacheRetentionHours` can be set to any positive integer value (24, 48, 72, 168, etc.)
 
+#### Historical selection semantics
+
+Historical requests filter by **observation time**, not by the capture folder timestamp. Bounds are inclusive and compared in UTC. A capture is included when any of its frame observations fall inside the requested interval.
+
+Duplicate observation times are resolved deterministically in favour of the newest complete capture (then folder name, ordinal). Exact observation deduplication replaces the previous unconditional four-minute thinning. `cacheRange` keeps its existing capture-folder fields and adds `oldestObservationTime`/`newestObservationTime`.
+
 #### Get Cache Range
 
 Get information about available historical cache data.
@@ -834,6 +898,30 @@ GET /api/cache/{suburb}/{state}/range
 }
 ```
 
+#### Get Location Status
+
+```http
+GET /api/cache/{suburb}/{state}/status
+```
+
+Returns `200 OK` even when the cache is empty. Operational state is persisted outside the capture-folder namespace.
+
+```json
+{
+  "cacheExists": true,
+  "cacheIsValid": false,
+  "isUpdating": false,
+  "lastSuccessfulCaptureAt": "2026-11-12T01:20:00Z",
+  "latestObservationAt": "2026-11-12T01:15:00Z",
+  "updateFailed": true,
+  "errorCode": "BROWSER_ERROR",
+  "consecutiveFailures": 1,
+  "nextRetryAt": "2026-11-12T01:27:00Z"
+}
+```
+
+`updateFailed`, `errorCode`, `error`, `lastUpdateAttempt`, `consecutiveFailures` and `nextRetryAt` are populated from actual outcomes. Error messages are bounded; exception dumps are not exposed.
+
 #### Refresh Cache
 
 Manually trigger a cache update for a location.
@@ -852,6 +940,8 @@ POST /api/cache/{suburb}/{state}/refresh
   "message": "Cache update triggered"
 }
 ```
+
+The rejection paths for queue saturation, shutdown, deletion conflict and active failure backoff return `429`, `503`, `409` and `429` respectively with a `rejectionCode`. Accepted work is independent of client disconnection; startup/shutdown admission races still need regression coverage and fixes.
 
 **Note on `nextUpdateTime`**: The estimated completion time is calculated using:
 - **Metrics-based estimation**: Uses historical median durations from previous cache updates (more accurate, hardware-adaptive)
@@ -872,6 +962,12 @@ DELETE /api/cache/{suburb}/{state}
   "message": "Cache deleted for Brisbane, QLD"
 }
 ```
+
+Returns `409 Conflict` when a capture is queued or running for the location. Only recognised cache folders are deleted; unknown directories and outside sentinel files are left untouched.
+
+### Retention exception
+
+Ordinary retention removes complete snapshots older than `CacheRetentionHours`. The newest complete snapshot per location is always preserved as a stale fallback, even when it is older than the retention window, and active captures are skipped. Unknown directories are never deleted.
 
 ## Cache Update Estimation
 
@@ -1252,11 +1348,95 @@ The service logs detailed performance metrics for each scraping workflow:
 
 ### Building Locally
 
+Requires the .NET 10 SDK selected by `global.json`.
+
 ```bash
-dotnet restore
-dotnet build
+dotnet restore --locked-mode
+dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
+dotnet build --configuration Release
+dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj --configuration Release --filter 'FullyQualifiedName!~DemoBrowserTests'
 dotnet run
 ```
+
+The `packages.lock.json` files make restores reproducible. Tests use real HTTP controllers, cache lookup, serialization, historical selection and a controllable capture boundary. Live BOM checks are separate from required PR checks.
+
+The browser test requires a running disposable service and an explicit
+`BOM_DEMO_BASE_URL`. Without that variable it returns without running Chromium,
+so an unfiltered test total is not evidence of a browser check.
+
+### Verification and soak checks
+
+```bash
+./scripts/verify-service.sh \
+  --base-url http://127.0.0.1:18082 \
+  --suburb Pomona \
+  --state QLD \
+  --output artifacts/verification
+
+./scripts/soak-service.sh \
+  --base-url http://127.0.0.1:18082 \
+  --duration-hours 30 \
+  --output artifacts/soak \
+  --container bom-local-service
+```
+
+`verify-service.sh` checks response fields, UTC observation bounds, returned
+frame URLs and PNG headers; it does not yet decode the images or establish
+freshness against the current time. `soak-service.sh` records observations,
+failures, retry timing, queue depth and available container resource metrics.
+Its memory parser and completion criteria still need fixes: an interrupted or
+failed trial can return success. These tools must be corrected and tested before
+their reports can establish release qualification.
+
+### Candidate validation and limitations
+
+Evidence available as of 2026-11-13:
+
+- Locked restores, the Release build/publish and **66 deterministic tests passed
+  on November 13**. Package vulnerability feeds were unavailable (`NU1900`), so
+  a dependency vulnerability audit was not completed.
+- The explicit demo browser test **passed once on November 12** using intercepted
+  API fixtures. It covers cold-cache recovery, playback and collection changes;
+  it does not establish live BOM or network-outage recovery.
+- Saved Pomona verification used the intermediate local service on port 18083.
+  Earlier two-location baseline results do not qualify the final candidate.
+- The saved soak ran for approximately **2 minutes 20 seconds** before
+  interruption: 3 successful samples, 5 failed samples, no observation
+  advancement and null memory metrics. No completed 30-hour trial is recorded
+  in the available artifacts.
+- Final candidate image digests, native architecture qualification and release
+  publication are still outstanding.
+
+Review found remaining backend gaps in reserved-directory/nested symlink
+containment, malformed metadata handling, PNG validation beyond the header,
+browser setup cancellation, refresh admission during startup/shutdown, and
+location/time-input validation. The demo also still has duplicate refresh
+timers, incomplete network-outage recovery, and failure details overwritten by
+its relative-time update. These limitations need fixes and regression coverage
+before release qualification. Card-side work is listed in the
+[HA handoff](docs/ha-handoff/README.md).
+
+### Release and rollback
+
+The candidate workflow is intended to build one image per architecture,
+smoke-test it on a native runner, publish the tested images and combine them
+into a multi-architecture index. That process has not yet qualified or published
+v0.1.1. Before release, record the final tested commit, per-architecture evidence
+and image digests in the release notes.
+
+To roll back, deploy the previously recorded digest explicitly:
+
+```bash
+docker pull ghcr.io/alexhopeoconnor/bom-local-service@sha256:<previous-digest>
+docker run -d --name bom-local-service \
+  -p 8082:8080 -v $(pwd)/cache:/app/cache \
+  --shm-size=1gb --ipc=host \
+  ghcr.io/alexhopeoconnor/bom-local-service@sha256:<previous-digest>
+```
+
+Automated fixtures cover reading legacy cache folders without renaming. A
+rollback of the final candidate has not been qualified; verify it against a copy
+of the cache before relying on the same volume across versions.
 
 ### Debug Mode
 

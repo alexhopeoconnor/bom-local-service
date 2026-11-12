@@ -1,0 +1,62 @@
+{
+  "frames": [
+    {
+      "absoluteObservationTime": "2026-11-12T07:05:00Z",
+      "frameIndex": 0,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_0.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/0?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    },
+    {
+      "absoluteObservationTime": "2026-11-12T07:10:00Z",
+      "frameIndex": 1,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_1.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/1?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    },
+    {
+      "absoluteObservationTime": "2026-11-12T07:15:00Z",
+      "frameIndex": 2,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_2.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/2?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    },
+    {
+      "absoluteObservationTime": "2026-11-12T07:20:00Z",
+      "frameIndex": 3,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_3.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/3?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    },
+    {
+      "absoluteObservationTime": "2026-11-12T07:25:00Z",
+      "frameIndex": 4,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_4.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/4?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    },
+    {
+      "absoluteObservationTime": "2026-11-12T07:30:00Z",
+      "frameIndex": 5,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_5.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/5?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    },
+    {
+      "absoluteObservationTime": "2026-11-12T07:35:00Z",
+      "frameIndex": 6,
+      "imagePath": "/app/cache/Pomona_QLD_20261112_074323/radar/frame_6.png",
+      "imageUrl": "/api/radar/Pomona/QLD/frame/6?cacheFolder=Pomona_QLD_20261112_074323",
+      "dataType": 0
+    }
+  ],
+  "lastUpdated": "2026-11-12T07:44:42.8923835+00:00",
+  "observationTime": "2026-11-12T07:40:00Z",
+  "forecastTime": "2026-11-12T06:00:00Z",
+  "weatherStation": "Tewantin",
+  "distance": "19 km",
+  "cacheIsValid": true,
+  "cacheExpiresAt": "2026-11-12T07:52:30Z",
+  "isUpdating": false,
+  "nextUpdateTime": "2026-11-12T07:52:30Z"
+}

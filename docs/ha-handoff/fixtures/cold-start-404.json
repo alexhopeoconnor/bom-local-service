@@ -1,0 +1,23 @@
+{
+  "errorCode": "CACHE_NOT_FOUND",
+  "message": "No cached data found for this location (fresh start). Cache update has been triggered in background. Please retry in a few moments.",
+  "errorType": "CacheError",
+  "details": {
+    "location": {
+      "suburb": "Pomona",
+      "state": "QLD"
+    },
+    "cacheExists": false,
+    "cacheIsValid": false,
+    "updateTriggered": true,
+    "nextUpdateTime": "2026-11-12T07:20:00Z",
+    "statusMessage": "No cache exists"
+  },
+  "suggestions": {
+    "action": "retry_after_seconds",
+    "refreshEndpoint": "/api/cache/Pomona/QLD/refresh",
+    "statusEndpoint": "/api/cache/Pomona/QLD/range",
+    "retryAfter": 90
+  },
+  "timestamp": "2026-11-12T07:16:33Z"
+}

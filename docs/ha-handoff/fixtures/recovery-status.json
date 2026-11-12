@@ -1,0 +1,21 @@
+{
+  "updateTriggered": false,
+  "cacheExists": true,
+  "cacheIsValid": true,
+  "cacheExpiresAt": "2026-11-12T07:57:30Z",
+  "nextUpdateTime": "2026-11-12T07:57:30Z",
+  "message": "Cache is valid, no update needed",
+  "updateFailed": false,
+  "error": null,
+  "errorCode": null,
+  "lastUpdateAttempt": "2026-11-12T07:44:00Z",
+  "consecutiveFailures": 0,
+  "nextRetryAt": null,
+  "lastSuccessfulCaptureAt": "2026-11-12T07:45:00Z",
+  "latestObservationAt": "2026-11-12T07:45:00Z",
+  "isUpdating": false,
+  "updateAccepted": false,
+  "rejectionCode": null,
+  "queueDepth": 0,
+  "retryAfterSeconds": null
+}
