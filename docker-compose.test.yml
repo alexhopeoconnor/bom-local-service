@@ -1,0 +1,76 @@
+# Disposable test stack for scripts/run-service-test.sh.
+#
+# The runner supplies every required BOM_TEST_* value, uses an unguessable
+# per-attempt compose project, binds only to loopback and labels every
+# container/network with both io.bom.test.run-id and
+# io.bom.test.owner-token.  Cleanup addresses only exact IDs whose inspected
+# labels match that pair and never prunes shared docker state.
+name: ${BOM_TEST_PROJECT:?BOM_TEST_PROJECT is required}
+
+services:
+  service:
+    image: ${BOM_TEST_IMAGE:?BOM_TEST_IMAGE is required}
+    pull_policy: never
+    ports:
+      - "127.0.0.1:${BOM_TEST_HOST_PORT:?BOM_TEST_HOST_PORT is required}:8080"
+    volumes:
+      - "${BOM_TEST_CACHE_DIR:?BOM_TEST_CACHE_DIR is required}:/app/cache"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${BOM_TEST_ASPNETCORE_ENVIRONMENT:-Production}
+      ASPNETCORE_URLS: http://+:8080
+      DISPLAY: ":99"
+      CORS__ALLOWEDORIGINS: ${BOM_TEST_CORS_ALLOWEDORIGINS:-*}
+      CORS__ALLOWEDMETHODS: ${BOM_TEST_CORS_ALLOWEDMETHODS:-GET,POST,DELETE,OPTIONS}
+      CORS__ALLOWEDHEADERS: ${BOM_TEST_CORS_ALLOWEDHEADERS:-*}
+      CORS__ALLOWCREDENTIALS: "false"
+      CACHEDIRECTORY: /app/cache
+      CACHERETENTIONHOURS: ${BOM_TEST_CACHE_RETENTION_HOURS:-24}
+      CACHEEXPIRATIONMINUTES: ${BOM_TEST_CACHE_EXPIRATION_MINUTES:-60}
+      CACHEMANAGEMENT__CHECKINTERVALMINUTES: ${BOM_TEST_CACHE_CHECK_INTERVAL_MINUTES:-5}
+      CACHEMANAGEMENT__INITIALDELAYSECONDS: ${BOM_TEST_CACHE_INITIAL_DELAY_SECONDS:-3600}
+      CACHEMANAGEMENT__LOCATIONSTAGGERSECONDS: ${BOM_TEST_CACHE_LOCATION_STAGGER_SECONDS:-1}
+      CACHECLEANUP__INTERVALHOURS: ${BOM_TEST_CACHE_CLEANUP_INTERVAL_HOURS:-1}
+      REFRESH__QUEUECAPACITY: ${BOM_TEST_REFRESH_QUEUE_CAPACITY:-16}
+      REFRESH__MAXCONCURRENTCAPTURES: ${BOM_TEST_REFRESH_MAX_CONCURRENT_CAPTURES:-1}
+      REFRESH__CAPTURETIMEOUTSECONDS: ${BOM_TEST_REFRESH_CAPTURE_TIMEOUT_SECONDS:-300}
+      REFRESH__BACKOFFBASESECONDS: ${BOM_TEST_REFRESH_BACKOFF_BASE_SECONDS:-60}
+      REFRESH__MAXBACKOFFSECONDS: ${BOM_TEST_REFRESH_MAX_BACKOFF_SECONDS:-900}
+      SCREENSHOT__DYNAMICCONTENTWAITMS: ${BOM_TEST_SCREENSHOT_DYNAMIC_CONTENT_WAIT_MS:-1500}
+      SCREENSHOT__TILERENDERWAITMS: ${BOM_TEST_SCREENSHOT_TILE_RENDER_WAIT_MS:-3000}
+      DEBUG__ENABLED: ${BOM_TEST_DEBUG_ENABLED:-false}
+      DEBUG__WAITMS: ${BOM_TEST_DEBUG_WAIT_MS:-2000}
+      TIMEZONE: ${BOM_TEST_TIMEZONE:-Australia/Brisbane}
+    shm_size: ${BOM_TEST_SHM_SIZE:-1gb}
+    cpus: ${BOM_TEST_CPUS:-2.0}
+    mem_limit: ${BOM_TEST_MEMORY_LIMIT:-2g}
+    pids_limit: ${BOM_TEST_PIDS_LIMIT:-512}
+    init: true
+    restart: "no"
+    stop_grace_period: 20s
+    labels:
+      io.bom.test.run-id: "${BOM_TEST_RUN_ID:?BOM_TEST_RUN_ID is required}"
+      io.bom.test.owner-token: "${BOM_TEST_OWNER_TOKEN:?BOM_TEST_OWNER_TOKEN is required}"
+      io.bom.test.runner-version: "${BOM_TEST_RUNNER_VERSION:?BOM_TEST_RUNNER_VERSION is required}"
+      io.bom.test.project: "${BOM_TEST_PROJECT:?BOM_TEST_PROJECT is required}"
+      io.bom.test.role: "service"
+      io.bom.test.supervised-by: "service_test_runner"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+
+networks:
+  default:
+    labels:
+      io.bom.test.run-id: "${BOM_TEST_RUN_ID:?BOM_TEST_RUN_ID is required}"
+      io.bom.test.owner-token: "${BOM_TEST_OWNER_TOKEN:?BOM_TEST_OWNER_TOKEN is required}"
+      io.bom.test.runner-version: "${BOM_TEST_RUNNER_VERSION:?BOM_TEST_RUNNER_VERSION is required}"
+      io.bom.test.project: "${BOM_TEST_PROJECT:?BOM_TEST_PROJECT is required}"
+      io.bom.test.supervised-by: "service_test_runner"

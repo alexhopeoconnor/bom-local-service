@@ -3,6 +3,7 @@ name: Service checks
 on:
   push:
     branches: [main, "fix/**"]
+    tags: ["v*"]
   pull_request:
   workflow_call:
   workflow_dispatch:
@@ -10,9 +11,99 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: service-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
 jobs:
-  build-test-publish:
+  plan:
+    name: Select architecture scope
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+      runner_labels: ${{ steps.labels.outputs.runner_labels }}
+    steps:
+      - name: Build architecture matrix
+        id: matrix
+        shell: bash
+        env:
+          INCLUDE_DEFERRED_ARM64: ${{ vars.BOM_INCLUDE_DEFERRED_ARM64 }}
+        run: |
+          set -euo pipefail
+          matrix="$(python3 - <<'PY'
+          import json
+          import os
+
+          include = [
+              {"arch": "amd64", "platform": "linux/amd64", "runner": "ubuntu-latest"}
+          ]
+          if os.environ.get("INCLUDE_DEFERRED_ARM64", "").lower() == "true":
+              include.append(
+                  {"arch": "arm64", "platform": "linux/arm64", "runner": "ubuntu-24.04-arm"}
+              )
+          print(json.dumps(include, separators=(",", ":")))
+          PY
+          )"
+          echo "include=$matrix" >> "$GITHUB_OUTPUT"
+
+      - name: Validate dedicated runner labels
+        id: labels
+        shell: bash
+        env:
+          DEDICATED_RUNNER_LABELS: ${{ vars.BOM_DEDICATED_RUNNER_LABELS }}
+          RUNNER_APPROVED: ${{ vars.BOM_RUNNER_APPROVED }}
+        run: |
+          set -euo pipefail
+          labels="$(python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          if os.environ.get("RUNNER_APPROVED", "").lower() != "true":
+              print(json.dumps(["self-hosted", "runner-disabled"], separators=(",", ":")))
+              raise SystemExit(0)
+          raw = os.environ.get("DEDICATED_RUNNER_LABELS", "").strip()
+          if not raw:
+              sys.exit(
+                  "repository variable BOM_DEDICATED_RUNNER_LABELS must be a JSON "
+                  "array of dedicated-runner labels"
+              )
+          try:
+              labels = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              sys.exit(f"BOM_DEDICATED_RUNNER_LABELS is not valid JSON: {exc}")
+          if (
+              not isinstance(labels, list)
+              or not labels
+              or not all(isinstance(item, str) and item.strip() for item in labels)
+          ):
+              sys.exit(
+                  "BOM_DEDICATED_RUNNER_LABELS must be a non-empty JSON array of strings"
+              )
+          if "self-hosted" not in labels:
+              sys.exit(
+                  "BOM_DEDICATED_RUNNER_LABELS must include 'self-hosted'; "
+                  "hosted runners do not provide a user systemd manager"
+              )
+          print(json.dumps(labels, separators=(",", ":")))
+          PY
+          )"
+          echo "runner_labels=$labels" >> "$GITHUB_OUTPUT"
+
+  deterministic:
+    name: Deterministic checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MSBUILDDISABLENODEREUSE: "1"
+      DOTNET_CLI_USE_MSBUILD_SERVER: "0"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -23,25 +114,76 @@ jobs:
           dotnet-version: 10.0.x
           global-json-file: global.json
 
+      - name: Read project version and enforce tags
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 scripts/prepare-candidate.py version --csproj BomLocalService.csproj)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+              echo "release tag $GITHUB_REF_NAME must equal v<MSBuild Version> (v$version)" >&2
+              exit 1
+            fi
+          fi
+
       - name: Restore application (locked)
         run: dotnet restore BomLocalService.csproj --locked-mode
+
+      - name: Pure helper tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test_candidate_release.py
+          python3 scripts/test_service_verification.py
+          python3 scripts/test_service_runner.py
 
       - name: Restore tests (locked)
         run: dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
 
-      - name: Test
+      - name: Deterministic tests
         run: |
           dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
             --configuration Release \
             --no-restore \
+            --filter "Category!=Browser" \
+            -p:UseSharedCompilation=false \
             --logger trx \
             --results-directory artifacts/test-results
+
+      - name: Dependency vulnerability audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/security
+          output="artifacts/security/dotnet-vulnerable-packages.txt"
+          outcome="unavailable"
+          if dotnet list BomLocalService.csproj package \
+              --vulnerable --include-transitive >"$output" 2>&1; then
+            if grep -Eiq 'has the following vulnerable packages' "$output"; then
+              cat "$output" >&2
+              echo "::error::dependency vulnerability audit reported vulnerable packages" >&2
+              exit 1
+            fi
+            if grep -Eiq 'no vulnerable packages|no packages were found' "$output"; then
+              outcome="passed"
+            else
+              echo "::warning::dependency vulnerability audit output was ambiguous" >&2
+            fi
+          else
+            echo "::warning::dependency vulnerability audit could not complete (feed unavailable?)" >&2
+          fi
+          echo "DEPENDENCY_AUDIT_OUTCOME=$outcome" >> "$GITHUB_ENV"
+          cat "$output" || true
 
       - name: Publish
         run: |
           dotnet publish BomLocalService.csproj \
             --configuration Release \
             --no-restore \
+            --disable-build-servers \
+            -p:UseSharedCompilation=false \
             --output artifacts/publish
 
       - name: Verify publication content
@@ -54,14 +196,59 @@ jobs:
           test ! -e artifacts/publish/artifacts
           test ! -e artifacts/publish/cache
           test ! -e artifacts/publish/global.json
-          if find artifacts/publish -type f \( -name '*.trx' -o -name 'packages.lock.json' -o -name '*Tests.dll' \) | grep -q .; then
-            echo "published output contains test or restore artifacts" >&2
+          # Reject every local override, credential/state sentinel and restore
+          # input, not only appsettings.Local.json.
+          python3 scripts/prepare-candidate.py audit-tree \
+            --root artifacts/publish \
+            --mode publish
+
+      - name: Prepare candidate base
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f .github/qualification-policy.json ]]; then
+            echo "::error::.github/qualification-policy.json is required before a candidate can be prepared."
+            echo "This committed machine-readable policy is coordinator-owned and is a delivery dependency." >&2
             exit 1
           fi
-          if find artifacts/publish -type f -name 'appsettings.Local.json' | grep -q .; then
-            echo "published output contains local overrides" >&2
-            exit 1
-          fi
+          python3 scripts/prepare-candidate.py init \
+            --source-dir . \
+            --source-commit "$GITHUB_SHA" \
+            --version "${{ steps.version.outputs.version }}" \
+            --csproj BomLocalService.csproj \
+            --config appsettings.json \
+            --policy .github/qualification-policy.json \
+            --script scripts/verify-service.sh \
+            --output-dir artifacts/candidate
+          python3 scripts/prepare-candidate.py write-report \
+            --check deterministic \
+            --status passed \
+            --source-commit "$GITHUB_SHA" \
+            --detail "testFilter=Category!=Browser" \
+            --detail "publicationContent=verified" \
+            --detail "dependencyAudit=$DEPENDENCY_AUDIT_OUTCOME" \
+            --output artifacts/candidate/reports/deterministic.json
+          python3 scripts/prepare-candidate.py record-evidence \
+            --candidate artifacts/candidate/candidate.json \
+            --check deterministic \
+            --status passed \
+            --report artifacts/candidate/reports/deterministic.json
+
+      - name: Upload deterministic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-base
+          path: artifacts/candidate
+          if-no-files-found: warn
+
+      - name: Upload dependency audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-audit
+          path: artifacts/security
+          if-no-files-found: warn
 
       - name: Upload test results
         if: always()
@@ -69,6 +256,7 @@ jobs:
         with:
           name: test-results
           path: artifacts/test-results
+          if-no-files-found: ignore
 
       - name: Upload published output
         uses: actions/upload-artifact@v4
@@ -76,38 +264,73 @@ jobs:
           name: published-app
           path: artifacts/publish
 
-  container-smoke:
-    runs-on: ubuntu-latest
-    needs: build-test-publish
+  image:
+    name: Build and export ${{ matrix.arch }} image once
+    needs: [deterministic, plan]
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.plan.outputs.include) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Build CPU image
-        run: docker build -t bom-local-service:ci .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Run CPU-only smoke checks
+      - name: Build native image once
         shell: bash
+        env:
+          CANDIDATE_VERSION: ${{ needs.deterministic.outputs.version }}
+          SOURCE_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
-          cache="$(mktemp -d)"
-          docker run -d --name bom-ci --publish 127.0.0.1:18082:8080 \
-            --mount "type=bind,source=$cache,target=/app/cache" \
-            --shm-size=1g --env DEBUG__ENABLED=false bom-local-service:ci
-          cleanup() { docker rm -f bom-ci >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          for _ in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:18082/api/health >/dev/null; then break; fi
-            sleep 2
-          done
-          curl -fsS http://127.0.0.1:18082/api/health
-          curl -fsS http://127.0.0.1:18082/api/ready | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="ready"; assert d["checks"]["refreshWorker"] is True'
-          docker exec bom-ci dotnet --list-runtimes | grep -E '^Microsoft\.AspNetCore\.App 10\.'
-          # No live BOM request is made by this required check.
+          test -n "$CANDIDATE_VERSION"
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --build-arg VERSION="$CANDIDATE_VERSION" \
+            --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+            --tag "bom-local-service:candidate-${{ matrix.arch }}" \
+            --load .
 
-  demo-browser:
-    runs-on: ubuntu-latest
-    needs: container-smoke
+      - name: Export exact image archive
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/candidate-image
+          python3 scripts/prepare-candidate.py record-image \
+            --arch "$CANDIDATE_ARCH" \
+            --image-ref "bom-local-service:candidate-$CANDIDATE_ARCH" \
+            --archive "artifacts/candidate-image/candidate-$CANDIDATE_ARCH.tar" \
+            --fragment artifacts/candidate-image/fragment.json \
+            --execute
+
+      - name: Upload exact image archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-image-${{ matrix.arch }}
+          path: artifacts/candidate-image
+          if-no-files-found: error
+
+  # Native/browser verification runs the frozen CLI 2.0.0 through its dedicated
+  # transient systemd unit.  The ad-hoc docker run/rm fallback was removed: the
+  # runner owns the compose container, port, cache and explicit cleanup.  The
+  # old runner remains under the safety hold and is never invoked.
+  native:
+    name: Native ${{ matrix.arch }} verification
+    needs: [deterministic, plan, image]
+    if: ${{ vars.BOM_RUNNER_APPROVED == 'true' }}
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.plan.outputs.include) }}
+    runs-on: ${{ fromJSON(needs.plan.outputs.runner_labels) }}
+    timeout-minutes: 45
+    env:
+      MSBUILDDISABLENODEREUSE: "1"
+      DOTNET_CLI_USE_MSBUILD_SERVER: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -118,42 +341,618 @@ jobs:
           dotnet-version: 10.0.x
           global-json-file: global.json
 
-      - name: Build tests and install Chromium
-        run: |
-          dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
-          dotnet build tests/BomLocalService.Tests/BomLocalService.Tests.csproj --configuration Release --no-restore
-          pwsh tests/BomLocalService.Tests/bin/Release/net10.0/playwright.ps1 install chromium
-
-      - name: Build and start service
+      - name: Build browser tests and install Chromium
         shell: bash
         run: |
           set -euo pipefail
-          docker build -t bom-local-service:demo .
-          cache="$(mktemp -d)"
-          docker run -d --name bom-demo --publish 127.0.0.1:18084:8080 \
-            --mount "type=bind,source=$cache,target=/app/cache" \
-            --shm-size=1g --env DEBUG__ENABLED=false bom-local-service:demo
-          for _ in $(seq 1 40); do
-            curl -fsS http://127.0.0.1:18084/api/health >/dev/null && break
-            sleep 2
-          done
+          dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
+          dotnet build tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
+            --configuration Release --no-restore \
+            --disable-build-servers \
+            -p:UseSharedCompilation=false
+          pwsh tests/BomLocalService.Tests/bin/Release/net10.0/playwright.ps1 install chromium
 
-      - name: Run deterministic demo browser test
-        env:
-          BOM_DEMO_BASE_URL: http://127.0.0.1:18084
+      - name: Download exact image archive
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-image-${{ matrix.arch }}
+          path: artifacts/images/${{ matrix.arch }}
+
+      - name: Extract exact archive identity
+        shell: bash
         run: |
-          dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
+          set -euo pipefail
+          fragment="artifacts/images/${{ matrix.arch }}/fragment.json"
+          python3 - "$fragment" <<'PY' >> "$GITHUB_ENV"
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          fragment = json.loads(Path(sys.argv[1]).read_text())
+          image = fragment["image"]
+          for key in ("imageId", "archiveSha256"):
+              if not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", image[key]):
+                  raise SystemExit(f"invalid {key}")
+          if "/" in image["archive"] or ".." in image["archive"]:
+              raise SystemExit("invalid archive name")
+          print(f"EXPECTED_IMAGE_ID={image['imageId']}")
+          print(f"EXPECTED_PLATFORM={image['platform']}")
+          print(f"EXPECTED_ARCHIVE_SHA={image['archiveSha256']}")
+          print(f"CANDIDATE_ARCHIVE=artifacts/images/${{ matrix.arch }}/{image['archive']}")
+          PY
+
+      - name: Load exact archive and verify identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EXPECTED_IMAGE_ID:-}"
+          test -n "${EXPECTED_PLATFORM:-}"
+          test -n "${EXPECTED_ARCHIVE_SHA:-}"
+          test -n "${CANDIDATE_ARCHIVE:-}"
+          echo "$EXPECTED_ARCHIVE_SHA  $CANDIDATE_ARCHIVE" | sha256sum -c -
+          docker load --input "$CANDIDATE_ARCHIVE"
+          loaded_id="$(docker image inspect --format '{{.Id}}' "$EXPECTED_IMAGE_ID")"
+          test "$loaded_id" = "$EXPECTED_IMAGE_ID"
+          loaded_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$EXPECTED_IMAGE_ID")"
+          test "$loaded_platform" = "$EXPECTED_PLATFORM"
+
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/runner-work
+          ./scripts/run-service-test.sh preflight | tee artifacts/runner-work/preflight.json
+          python3 - artifacts/runner-work/preflight.json <<'PY' >> "$GITHUB_ENV"
+          import json
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if not data.get("systemd", {}).get("ok") or not data.get("cgroup2"):
+              raise SystemExit("dedicated systemd user manager and cgroup2 are required")
+          print(f"RUNNER_VERSION={data.get('runnerVersion') or 'unknown'}")
+          PY
+
+      - name: Prepare bounded native/browser test command
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/check-candidate-image.py || {
+            echo "::error::scripts/check-candidate-image.py is required" >&2
+            exit 1
+          }
+          cat > artifacts/runner-work/expected-browser-tests.json <<'JSON'
+          {
+            "schema": "browser-expected/v1",
+            "cases": [
+              "DemoBrowserTests.Demo_shows_cold_start_404_then_recovers",
+              "DemoBrowserTests.Demo_recovers_from_network_outage_and_restarts_playback",
+              "DemoBrowserTests.Demo_preserves_stale_failure_detail_through_relative_updates",
+              "DemoBrowserTests.Demo_renders_every_history_frame_in_chronological_order",
+              "DemoBrowserTests.Demo_clamps_shorter_replacement_and_clears_empty_collection",
+              "DemoBrowserTests.Demo_uses_one_poll_owner_without_overlapping_requests",
+              "RealBrowserLifecycleTests.Two_contexts_survive_reset_then_release_and_next_context_succeeds",
+              "RealBrowserLifecycleTests.Caller_cancellation_during_delayed_page_releases_capacity",
+              "RealBrowserLifecycleTests.Browser_crash_disconnects_exact_owned_browser_and_service_recreates",
+              "RealBrowserLifecycleTests.Browser_graceful_close_disconnects_exact_owned_browser_and_service_recreates"
+            ]
+          }
+          JSON
+          cat > artifacts/runner-work/native-test.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          : "${BOM_TEST_BASE_URL:?runner did not inject BOM_TEST_BASE_URL}"
+          export BOM_DEMO_BASE_URL="$BOM_TEST_BASE_URL"
+          export BOM_REAL_BROWSER_TESTS=1
+          export MSBUILDDISABLENODEREUSE=1
+          export DOTNET_CLI_USE_MSBUILD_SERVER=0
+          command -v xvfb-run >/dev/null || {
+            echo "xvfb-run is required for headed real-browser tests" >&2
+            exit 1
+          }
+          python3 scripts/check-candidate-image.py
+          # DISPLAY is owned by this xvfb-run -a process inside the runner unit.
+          xvfb-run -a dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
             --configuration Release --no-build \
-            --filter "FullyQualifiedName~DemoBrowserTests" \
-            --logger trx --results-directory artifacts/demo-results
+            --filter "Category=Browser" \
+            -p:UseSharedCompilation=false \
+            --logger trx --results-directory artifacts/browser-results
+          python3 - artifacts/runner-work/expected-browser-tests.json <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+          from pathlib import Path
 
-      - name: Stop service
-        if: always()
-        run: docker rm -f bom-demo >/dev/null 2>&1 || true
+          expected_path = Path(sys.argv[1])
+          expected = json.loads(expected_path.read_text(encoding="utf-8"))
+          if expected.get("schema") != "browser-expected/v1":
+              raise SystemExit("invalid expected browser case schema")
+          cases = expected.get("cases")
+          if not isinstance(cases, list) or len(cases) != 10:
+              raise SystemExit("expected browser case list must contain ten cases")
+          if len(set(cases)) != len(cases):
+              raise SystemExit("expected browser case list contains duplicates")
+          expected_set = set(cases)
+          demo_cases = [case for case in expected_set if case.startswith("DemoBrowserTests.")]
+          real_cases = [case for case in expected_set if case.startswith("RealBrowserLifecycleTests.")]
+          if len(demo_cases) != 6 or len(real_cases) != 4:
+              raise SystemExit("expected six demo and four real-lifecycle browser cases")
 
-      - name: Upload demo results
+          results_dir = Path("artifacts/browser-results")
+          trx_files = sorted(results_dir.rglob("*.trx"))
+          if len(trx_files) != 1:
+              raise SystemExit(f"expected exactly one TRX file, found {len(trx_files)}")
+          trx = trx_files[0]
+          root = ET.parse(trx).getroot()
+          def local(tag: str) -> str:
+              return tag.rsplit("}", 1)[-1]
+          rows = [node for node in root.iter() if local(node.tag) == "UnitTestResult"]
+          if not rows:
+              raise SystemExit("TRX contains no executed test results")
+          names: list[str] = []
+          outcomes: list[str] = []
+          for row in rows:
+              full = (row.get("testName") or "").strip()
+              parts = full.split(".")
+              if len(parts) < 2:
+                  raise SystemExit(f"TRX testName is not Class.Method: {full!r}")
+              names.append(".".join(parts[-2:]))
+              outcomes.append((row.get("outcome") or "").strip())
+          if len(names) != len(set(names)):
+              raise SystemExit("TRX contains duplicate test results")
+          missing = sorted(expected_set - set(names))
+          extra = sorted(set(names) - expected_set)
+          if missing or extra:
+              raise SystemExit(f"browser case set mismatch; missing={missing}, unexpected={extra}")
+          failed = [(name, outcome) for name, outcome in zip(names, outcomes)
+                    if outcome != "Passed"]
+          if failed:
+              raise SystemExit(f"browser cases did not all pass: {failed}")
+          trx_sha = hashlib.sha256(trx.read_bytes()).hexdigest()
+          names_sha = hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()
+          completion = {
+              "schema": "browser-completion/v1",
+              "runId": os.environ.get("BOM_TEST_RUN_ID", ""),
+              "trx": trx.name,
+              "trxSha256": trx_sha,
+              "testNamesSha256": names_sha,
+              "expectedCaseCount": len(expected_set),
+              "executedCaseCount": len(rows),
+              "passedCaseCount": sum(1 for outcome in outcomes if outcome == "Passed"),
+              "failedCaseCount": sum(1 for outcome in outcomes
+                                     if outcome not in {"Passed", "NotExecuted", "Skipped", "Inconclusive"}),
+              "skippedCaseCount": sum(1 for outcome in outcomes
+                                      if outcome in {"NotExecuted", "Skipped", "Inconclusive"}),
+              "completedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          }
+          (results_dir / "completion.json").write_text(
+              json.dumps(completion, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(completion))
+          PY
+          SH
+          chmod +x artifacts/runner-work/native-test.sh
+
+      - name: Run native/browser checks through dedicated unit
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          ./scripts/run-service-test.sh run \
+            --mode container \
+            --image "$EXPECTED_IMAGE_ID" \
+            --compose-file docker-compose.test.yml \
+            --test-command "artifacts/runner-work/native-test.sh" \
+            --test-env "PATH=$PATH" \
+            --max-duration 20m \
+            --outer-timeout 26m \
+            --cpu-quota 200% \
+            --memory-max 2G \
+            --tasks-max 512 \
+            --cpus 2.0 \
+            --memory-limit 2g \
+            --pids-limit 512 \
+            --detach > artifacts/runner-work/run.json
+          RUN_ID="$(python3 - artifacts/runner-work/run.json <<'PY'
+          import json
+          import re
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if data.get("status") != "started":
+              raise SystemExit(f"runner did not start: {data}")
+          if data.get("clientDisconnectedSafe") is not True:
+              raise SystemExit("runner did not confirm detached safety")
+          if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", data.get("runId") or ""):
+              raise SystemExit(f"invalid runner run id: {data.get('runId')!r}")
+          for key in ("evidenceDir", "unit", "invocationId", "controlGroup"):
+              if not data.get(key):
+                  raise SystemExit(f"runner omitted {key}")
+          print(data["runId"])
+          PY
+          )"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          python3 - artifacts/runner-work/run.json <<'PY' >> "$GITHUB_ENV"
+          import json
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          print(f"RUNNER_UNIT={data['unit']}")
+          print(f"RUNNER_INVOCATION_ID={data['invocationId']}")
+          print(f"RUNNER_CONTROL_GROUP={data['controlGroup']}")
+          PY
+
+      - name: Wait for bounded runner completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUN_ID:-}"
+          ./scripts/run-service-test.sh wait --run-id "$RUN_ID" | tee artifacts/runner-work/wait.json
+
+      - name: Explicit runner cleanup
+        if: ${{ always() && env.RUN_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/run-service-test.sh cleanup --run-id "$RUN_ID" | tee artifacts/runner-work/cleanup.json
+
+      - name: Observe terminal runner state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUN_ID:-}"
+          ./scripts/run-service-test.sh status --run-id "$RUN_ID" | tee artifacts/runner-work/status.json
+          python3 - artifacts/runner-work/status.json <<'PY'
+          import json
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if data.get("bindingCurrent") is not True:
+              raise SystemExit("runner binding is not current")
+          if data.get("identityVerified") is not True:
+              raise SystemExit("runner unit identity is not verified")
+          completion = data.get("completion") or {}
+          if completion.get("verified") is not True:
+              raise SystemExit("runner final observation is not verified")
+          if data.get("effectiveStatus") != "passed":
+              raise SystemExit(f"runner observed status is {data.get('effectiveStatus')!r}")
+          finalization = data.get("finalization") or {}
+          cleanup = finalization.get("cleanup") or {}
+          if cleanup.get("destructiveOk") is not True:
+              raise SystemExit("runner cleanup is not verified")
+          PY
+
+      - name: Validate native smoke and browser TRX
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUN_ID:-}"
+          test -n "${EXPECTED_IMAGE_ID:-}"
+          run_dir="artifacts/execution/runner/runs/$RUN_ID"
+          mkdir -p artifacts/native-evidence
+          python3 - artifacts/runner-work/expected-browser-tests.json artifacts/browser-results "$run_dir" <<'PY' >> "$GITHUB_ENV"
+          import hashlib
+          import json
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          expected = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if expected.get("schema") != "browser-expected/v1":
+              raise SystemExit("invalid expected browser case schema")
+          cases = expected.get("cases")
+          if not isinstance(cases, list) or not cases or len(set(cases)) != len(cases):
+              raise SystemExit("expected browser case list is invalid")
+          expected_set = set(cases)
+          demo_cases = [case for case in expected_set if case.startswith("DemoBrowserTests.")]
+          real_cases = [case for case in expected_set if case.startswith("RealBrowserLifecycleTests.")]
+          if len(expected_set) != 10 or len(demo_cases) != 6 or len(real_cases) != 4:
+              raise SystemExit("expected six demo and four real-lifecycle browser cases")
+          results_dir = Path(sys.argv[2])
+          run_dir = Path(sys.argv[3])
+
+          trx_files = sorted(results_dir.rglob("*.trx"))
+          if len(trx_files) != 1:
+              raise SystemExit(f"expected exactly one TRX file, found {len(trx_files)}")
+          trx = trx_files[0]
+          root = ET.parse(trx).getroot()
+          def local(tag: str) -> str:
+              return tag.rsplit("}", 1)[-1]
+          rows = [node for node in root.iter() if local(node.tag) == "UnitTestResult"]
+          if not rows:
+              raise SystemExit("TRX contains no executed test results")
+          names: list[str] = []
+          outcomes: list[str] = []
+          for row in rows:
+              full = (row.get("testName") or "").strip()
+              parts = full.split(".")
+              if len(parts) < 2:
+                  raise SystemExit(f"TRX testName is not Class.Method: {full!r}")
+              names.append(".".join(parts[-2:]))
+              outcomes.append((row.get("outcome") or "").strip())
+          if len(names) != len(set(names)):
+              raise SystemExit("TRX contains duplicate test results")
+          missing = sorted(expected_set - set(names))
+          extra = sorted(set(names) - expected_set)
+          if missing or extra:
+              raise SystemExit(f"browser case set mismatch; missing={missing}, unexpected={extra}")
+          failed = [(name, outcome) for name, outcome in zip(names, outcomes)
+                    if outcome != "Passed"]
+          if failed:
+              raise SystemExit(f"browser cases did not all pass: {failed}")
+          trx_sha = hashlib.sha256(trx.read_bytes()).hexdigest()
+          names_sha = hashlib.sha256("\n".join(sorted(names)).encode("utf-8")).hexdigest()
+
+          completion_path = results_dir / "completion.json"
+          if not completion_path.is_file():
+              raise SystemExit("browser completion marker is missing")
+          completion = json.loads(completion_path.read_text(encoding="utf-8"))
+          if completion.get("schema") != "browser-completion/v1":
+              raise SystemExit("invalid browser completion schema")
+          if completion.get("runId") != os.environ.get("RUN_ID"):
+              raise SystemExit("browser completion runId does not match RUN_ID")
+          if completion.get("trx") != trx.name:
+              raise SystemExit("browser completion TRX name does not match")
+          if completion.get("trxSha256") != trx_sha:
+              raise SystemExit("browser completion TRX hash does not match")
+          if completion.get("testNamesSha256") != names_sha:
+              raise SystemExit("browser completion test-name hash does not match")
+          expected_count = len(expected_set)
+          for key in ("expectedCaseCount", "executedCaseCount", "passedCaseCount"):
+              if completion.get(key) != expected_count:
+                  raise SystemExit(f"browser completion {key} is not {expected_count}")
+          for key in ("failedCaseCount", "skippedCaseCount"):
+              if completion.get(key) != 0:
+                  raise SystemExit(f"browser completion {key} is not zero")
+          completion_sha = hashlib.sha256(completion_path.read_bytes()).hexdigest()
+
+          smoke_path = run_dir / "native-smoke" / "report.json"
+          png_path = run_dir / "native-smoke" / "native-smoke.png"
+          if not smoke_path.is_file() or smoke_path.is_symlink():
+              raise SystemExit("native-smoke/report.json is missing or unsafe")
+          if not png_path.is_file() or png_path.is_symlink():
+              raise SystemExit("native-smoke/native-smoke.png is missing or unsafe")
+          smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
+          if smoke.get("schema") != "native-smoke/v1":
+              raise SystemExit("invalid native-smoke schema")
+          if smoke.get("runId") != os.environ.get("RUN_ID"):
+              raise SystemExit("native-smoke runId does not match RUN_ID")
+          if smoke.get("status") != "passed":
+              raise SystemExit(f"native-smoke status is {smoke.get('status')!r}")
+          image = smoke.get("image") or {}
+          if image.get("imageId") != os.environ.get("EXPECTED_IMAGE_ID"):
+              raise SystemExit("native-smoke image ID does not match the candidate image")
+          ownership = smoke.get("ownership") or {}
+          if ownership.get("dockerEndpointVerified") is not True:
+              raise SystemExit("native-smoke pinned Docker endpoint is not verified")
+          if ownership.get("singleContainer") is not True:
+              raise SystemExit("native-smoke did not observe exactly one container")
+          served = (smoke.get("checks") or {}).get("servedImages")
+          if not isinstance(served, list) or len(served) != 14:
+              raise SystemExit(f"native-smoke served image count is not 14: {served!r}")
+          native_browser = (smoke.get("checks") or {}).get("nativeBrowser") or {}
+          if native_browser.get("decoded") is not True:
+              raise SystemExit("native-smoke Chromium PNG was not decoded")
+          png_sha = hashlib.sha256(png_path.read_bytes()).hexdigest()
+          if native_browser.get("sha256") != png_sha:
+              raise SystemExit("native-smoke PNG hash does not match its report")
+          smoke_sha = hashlib.sha256(smoke_path.read_bytes()).hexdigest()
+
+          validation = {
+              "schema": "browser-validation/v1",
+              "runId": os.environ["RUN_ID"],
+              "trx": trx.name,
+              "trxSha256": trx_sha,
+              "completionSha256": completion_sha,
+              "testNamesSha256": names_sha,
+              "expectedCaseCount": expected_count,
+              "executedCaseCount": len(rows),
+              "passedCaseCount": sum(1 for outcome in outcomes if outcome == "Passed"),
+              "failedCaseCount": 0,
+              "skippedCaseCount": 0,
+              "nativeSmokeReportSha256": smoke_sha,
+              "nativeSmokePngSha256": png_sha,
+              "nativeSmokeImageId": image["imageId"],
+          }
+          validation_path = Path("artifacts/native-evidence") / "browser-validation.json"
+          validation_path.write_text(
+              json.dumps(validation, indent=2) + "\n", encoding="utf-8")
+          validation_sha = hashlib.sha256(validation_path.read_bytes()).hexdigest()
+          print(f"BROWSER_VALIDATION_SHA256={validation_sha}")
+          print(f"BROWSER_TRX_SHA256={trx_sha}")
+          print(f"BROWSER_COMPLETION_SHA256={completion_sha}")
+          print(f"BROWSER_TEST_NAMES_SHA256={names_sha}")
+          print(f"BROWSER_EXPECTED_CASE_COUNT={expected_count}")
+          print(f"BROWSER_EXECUTED_CASE_COUNT={len(rows)}")
+          print(f"BROWSER_PASSED_CASE_COUNT={sum(1 for outcome in outcomes if outcome == 'Passed')}")
+          print(f"BROWSER_FAILED_CASE_COUNT=0")
+          print(f"BROWSER_SKIPPED_CASE_COUNT=0")
+          print(f"NATIVE_SMOKE_REPORT_SHA256={smoke_sha}")
+          print(f"NATIVE_SMOKE_PNG_SHA256={png_sha}")
+          print(f"NATIVE_SMOKE_IMAGE_ID={image['imageId']}")
+          PY
+
+      - name: Write bound native evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_dir="artifacts/execution/runner/runs/$RUN_ID"
+          for name in ownership.json unit-identity.json boundary.json summary.json finalization.json; do
+            test -f "$run_dir/$name" || { echo "::error::runner evidence missing $name" >&2; exit 1; }
+          done
+          python3 scripts/prepare-candidate.py write-report \
+            --check "native-${{ matrix.arch }}" \
+            --status passed \
+            --source-commit "$GITHUB_SHA" \
+            --arch "${{ matrix.arch }}" \
+            --image-id "$EXPECTED_IMAGE_ID" \
+            --archive-sha256 "$EXPECTED_ARCHIVE_SHA" \
+            --detail "runnerVersion=$RUNNER_VERSION" \
+            --detail "runnerRunId=$RUN_ID" \
+            --detail "runnerUnit=$RUNNER_UNIT" \
+            --detail "runnerInvocationId=$RUNNER_INVOCATION_ID" \
+            --detail "runnerControlGroup=$RUNNER_CONTROL_GROUP" \
+            --detail "runnerOwnershipSha256=$(sha256sum "$run_dir/ownership.json" | awk '{print $1}')" \
+            --detail "runnerUnitIdentitySha256=$(sha256sum "$run_dir/unit-identity.json" | awk '{print $1}')" \
+            --detail "runnerBoundarySha256=$(sha256sum "$run_dir/boundary.json" | awk '{print $1}')" \
+            --detail "runnerSummarySha256=$(sha256sum "$run_dir/summary.json" | awk '{print $1}')" \
+            --detail "runnerFinalizationSha256=$(sha256sum "$run_dir/finalization.json" | awk '{print $1}')" \
+            --detail "runnerCompletionVerified=true" \
+            --detail "runnerCleanupDestructiveOk=true" \
+            --detail "nativeSmokeReportSha256=$NATIVE_SMOKE_REPORT_SHA256" \
+            --detail "browserTrxSha256=$BROWSER_TRX_SHA256" \
+            --output artifacts/native-evidence/report.json
+          python3 scripts/prepare-candidate.py write-report \
+            --check browser \
+            --status passed \
+            --source-commit "$GITHUB_SHA" \
+            --arch "${{ matrix.arch }}" \
+            --image-id "$EXPECTED_IMAGE_ID" \
+            --archive-sha256 "$EXPECTED_ARCHIVE_SHA" \
+            --detail "browserTrxSha256=$BROWSER_TRX_SHA256" \
+            --detail "browserCompletionSha256=$BROWSER_COMPLETION_SHA256" \
+            --detail "browserTestNamesSha256=$BROWSER_TEST_NAMES_SHA256" \
+            --detail "browserExpectedCaseCount=$BROWSER_EXPECTED_CASE_COUNT" \
+            --detail "browserExecutedCaseCount=$BROWSER_EXECUTED_CASE_COUNT" \
+            --detail "browserPassedCaseCount=$BROWSER_PASSED_CASE_COUNT" \
+            --detail "browserFailedCaseCount=$BROWSER_FAILED_CASE_COUNT" \
+            --detail "browserSkippedCaseCount=$BROWSER_SKIPPED_CASE_COUNT" \
+            --detail "browserValidationSha256=$BROWSER_VALIDATION_SHA256" \
+            --detail "browserValidationPath=artifacts/native-evidence/browser-validation.json" \
+            --detail "nativeSmokeReportSha256=$NATIVE_SMOKE_REPORT_SHA256" \
+            --detail "nativeSmokePngSha256=$NATIVE_SMOKE_PNG_SHA256" \
+            --detail "nativeSmokeImageId=$NATIVE_SMOKE_IMAGE_ID" \
+            --detail "runnerRunId=$RUN_ID" \
+            --output artifacts/native-evidence/browser-report.json
+
+      - name: Upload native evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: demo-browser-results
-          path: artifacts/demo-results
+          name: native-evidence-${{ matrix.arch }}
+          path: artifacts/native-evidence
+          if-no-files-found: warn
+
+      - name: Upload browser results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-results-${{ matrix.arch }}
+          path: artifacts/browser-results
+          if-no-files-found: warn
+
+      - name: Upload runner evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-evidence-${{ matrix.arch }}
+          path: |
+            artifacts/runner-work
+            artifacts/execution/runner/runs
+          if-no-files-found: warn
+
+  candidate:
+    name: Assemble candidate manifest
+    needs: [deterministic, plan, native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download candidate base
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-base
+          path: artifacts/candidate
+
+      - name: Download amd64 image identity
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-image-amd64
+          path: artifacts/images/amd64
+
+      - name: Download arm64 image identity
+        if: ${{ vars.BOM_INCLUDE_DEFERRED_ARM64 == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-image-arm64
+          path: artifacts/images/arm64
+
+      - name: Download amd64 native evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: native-evidence-amd64
+          path: artifacts/native-evidence/amd64
+
+      - name: Download arm64 native evidence
+        if: ${{ vars.BOM_INCLUDE_DEFERRED_ARM64 == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: native-evidence-arm64
+          path: artifacts/native-evidence/arm64
+
+      - name: Merge, bind evidence and verify candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This manifest stays unqualified: live-location, fault-recovery and
+          # upgrade/rollback evidence are recorded in later, separate runs.
+          # Promotion consumes only a candidate whose qualification.status is
+          # "qualified" after those reports are bound.
+          fragments=(--fragment artifacts/images/amd64/fragment.json)
+          if [[ -f artifacts/images/arm64/fragment.json ]]; then
+            fragments+=(--fragment artifacts/images/arm64/fragment.json)
+          fi
+          python3 scripts/prepare-candidate.py merge \
+            --candidate artifacts/candidate/candidate.json \
+            "${fragments[@]}" \
+            --output artifacts/candidate/candidate.json
+          python3 scripts/prepare-candidate.py record-evidence \
+            --candidate artifacts/candidate/candidate.json \
+            --check native-amd64 \
+            --status passed \
+            --arch amd64 \
+            --report artifacts/native-evidence/amd64/report.json
+          python3 scripts/prepare-candidate.py record-evidence \
+            --candidate artifacts/candidate/candidate.json \
+            --check browser \
+            --status passed \
+            --arch amd64 \
+            --report artifacts/native-evidence/amd64/browser-report.json
+          if [[ -f artifacts/native-evidence/arm64/report.json ]]; then
+            python3 scripts/prepare-candidate.py record-evidence \
+              --candidate artifacts/candidate/candidate.json \
+              --check native-arm64 \
+              --status passed \
+              --arch arm64 \
+              --report artifacts/native-evidence/arm64/report.json
+          fi
+          python3 scripts/prepare-candidate.py finalize \
+            --candidate artifacts/candidate/candidate.json \
+            --source-dir . \
+            --archive-dir amd64=artifacts/images/amd64 \
+            --archive-dir arm64=artifacts/images/arm64 \
+            --require-files \
+            --require-archives
+          python3 scripts/prepare-candidate.py verify \
+            --candidate artifacts/candidate/candidate.json \
+            --source-dir . \
+            --archive-dir amd64=artifacts/images/amd64 \
+            --archive-dir arm64=artifacts/images/arm64 \
+            --require-files \
+            --require-archives \
+            --require-all-arches \
+            --require-unpublished
+          ( cd artifacts/candidate && sha256sum candidate.json > candidate.json.sha256 )
+
+      - name: Upload candidate manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-manifest
+          path: artifacts/candidate
+          if-no-files-found: error

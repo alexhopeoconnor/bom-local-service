@@ -6,12 +6,16 @@
 
 A local caching service for Australian Bureau of Meteorology (BOM) radar data, designed to provide a reliable API for Home Assistant integrations and other local services.
 
-**Development status (2026-11-13):** This checkout contains the **unreleased
+**Development status (2026-11-15):** This checkout contains the **unreleased
 v0.1.1 candidate**. The architecture and API changes below describe that
 candidate; they are not yet available in a published v0.1.1 image. The latest
 GitHub release is [v0.0.6](https://github.com/alexhopeoconnor/bom-local-service/releases/tag/v0.0.6).
 See [candidate validation and limitations](#candidate-validation-and-limitations)
-before treating the candidate as release-qualified.
+before treating the candidate as release-qualified. The active service-only
+implementation and evidence requirements are tracked in the
+[service qualification register](docs/service-qualification.md). Test instances
+must use isolated resources, a finite lifetime and verified teardown; a completed
+short smoke run does not qualify the planned 30-hour trial.
 
 ## Background
 
@@ -66,12 +70,12 @@ The scraping system uses a **workflow-based architecture** with configurable ste
 - **Workflow Steps**: Individual steps within workflows can be enabled/disabled via configuration, providing flexibility for testing and troubleshooting
 
 ### Background Services
-- **CacheRefreshService**: Hosted worker that owns refresh work independently of HTTP requests, with shutdown and capture-deadline cancellation. Browser setup and admission-race gaps remain under review.
+- **CacheRefreshService**: Hosted worker that owns refresh work independently of HTTP requests. The worker restores durable state before admission and coordinates queueing with shutdown; focused regression checks pass.
 - **CacheManagementService**: Periodically requests refreshes for known locations through the same queue.
 - **CacheCleanupService**: Removes recognised expired snapshots while preserving the newest complete fallback per location and leaving unrecognised top-level directories alone.
 
 ### Cache Publication
-A capture writes into `cache/.staging/` and passes metadata, frame-index and PNG-header checks before a same-filesystem rename into `cache/{Location}_{Timestamp}/`. Readers select metadata and frames from one snapshot. Full PNG decoding and malformed-metadata handling remain review gaps. Legacy complete folders without the new `.complete` marker remain readable.
+A capture writes into `cache/.staging/` before a same-filesystem rename into a final snapshot folder. The current source validates bounded metadata, frame indices, PNG structure and decoded pixels before publication. Readers select metadata and frames from one snapshot. Supported complete legacy folders without `.complete` remain readable. Containment, corruption, identity and legacy compatibility regressions pass.
 
 ### API Layer
 - **RadarController**: REST endpoints for accessing radar data (`/api/radar/{suburb}/{state}`)
@@ -506,8 +510,8 @@ When running locally with default settings: `http://localhost:8082`
 
 ### API and cache compatibility contract
 
-This table describes the intended compatibility contract. Automated tests cover
-the main paths; location and malformed-time-input gaps remain listed under
+This table describes the intended compatibility contract. Follow-up source and
+regression cases are implemented; execution status is listed under
 [candidate validation and limitations](#candidate-validation-and-limitations).
 
 | Behaviour | Intended contract |
@@ -524,7 +528,7 @@ the main paths; location and malformed-time-input gaps remain listed under
 | Deletion during queued/running capture | Explicit HTTP 409 conflict, rather than racing the writer |
 | Frame indices | Validated against the relevant snapshot/configuration, without hard-coded `0..6` assumptions |
 
-Ordinary Australian place-name punctuation is retained, including apostrophes, hyphens, periods, spaces and Unicode letters. Cache folder names still use the historical `Suburb_State_YYYYMMDD_HHMMSS` convention (spaces become underscores); identity comparison normalizes case and whitespace without rewriting existing paths.
+Ordinary Australian place-name punctuation is retained, including apostrophes, hyphens, periods, spaces and Unicode letters. Lossless names keep `Suburb_State_YYYYMMDD_HHMMSS` (spaces become underscores). Literal underscores, commas and leading-dot names use `v2~<base64url-UTF8-suburb>~STATE~YYYYMMDD~HHMMSS`. Identity comparison normalizes case and whitespace. Both final and staging basenames must fit 255 UTF-8 bytes. Legacy underscores continue to mean spaces; they are never guessed to mean literal underscores or omitted commas.
 
 `cacheFolders` grouping is preserved in historical responses for compatibility. Captures can overlap, so grouping by capture cannot guarantee global playback order. Consumers should flatten and sort by `absoluteObservationTime`:
 
@@ -1354,15 +1358,23 @@ Requires the .NET 10 SDK selected by `global.json`.
 dotnet restore --locked-mode
 dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
 dotnet build --configuration Release
-dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj --configuration Release --filter 'FullyQualifiedName!~DemoBrowserTests'
-dotnet run
+dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj --configuration Release --filter 'Category!=Browser'
 ```
 
 The `packages.lock.json` files make restores reproducible. Tests use real HTTP controllers, cache lookup, serialization, historical selection and a controllable capture boundary. Live BOM checks are separate from required PR checks.
 
-The browser test requires a running disposable service and an explicit
-`BOM_DEMO_BASE_URL`. Without that variable it returns without running Chromium,
-so an unfiltered test total is not evidence of a browser check.
+Browser tests require an owned disposable service and an explicit
+`BOM_DEMO_BASE_URL`. The dedicated browser run fails when prerequisites are
+missing; deterministic runs explicitly exclude `Category=Browser`. Browser
+scenarios cover recovery, stale failure details, history ordering, shorter/empty
+collections and polling ownership. Six demo cases and four production Chromium lifecycle cases have executed successfully across the initial and focused runs.
+
+The dedicated-unit runner passed independent source review, 66 pure checks and
+11 native/container lifecycle fixtures. Use `scripts/run-service-test.sh` for
+service and browser work; it bounds lifetime and verifies teardown. It requires
+a systemd user manager and cgroup v2; long runs also require linger. A present
+`artifacts/execution/runner/SAFETY_HOLD` blocks execution. See the
+[qualification register](docs/service-qualification.md).
 
 ### Verification and soak checks
 
@@ -1380,41 +1392,44 @@ so an unfiltered test total is not evidence of a browser check.
   --container bom-local-service
 ```
 
-`verify-service.sh` checks response fields, UTC observation bounds, returned
-frame URLs and PNG headers; it does not yet decode the images or establish
-freshness against the current time. `soak-service.sh` records observations,
-failures, retry timing, queue depth and available container resource metrics.
-Its memory parser and completion criteria still need fixes: an interrupted or
-failed trial can return success. These tools must be corrected and tested before
-their reports can establish release qualification.
+These entry points validate an already-running test instance; its owning runner
+must supervise its lifetime and teardown. Qualification also requires the frozen
+candidate manifest and policy, actual inspected image identity, and reports tied
+to those inputs. The verifier and soak enforce complete image
+validation, freshness, exact ownership, bounded requests, monotonic progression
+and honest duration/exit accounting; 50 helper and simulated-loop checks pass. Short or interrupted runs cannot qualify.
+Their current source is not yet qualified by end-to-end execution.
 
 ### Candidate validation and limitations
 
-Evidence available as of 2026-11-13:
+Evidence available as of 2026-11-15:
 
-- Locked restores, the Release build/publish and **66 deterministic tests passed
-  on November 13**. Package vulnerability feeds were unavailable (`NU1900`), so
-  a dependency vulnerability audit was not completed.
-- The explicit demo browser test **passed once on November 12** using intercepted
-  API fixtures. It covers cold-cache recovery, playback and collection changes;
-  it does not establish live BOM or network-outage recovery.
-- Saved Pomona verification used the intermediate local service on port 18083.
-  Earlier two-location baseline results do not qualify the final candidate.
-- The saved soak ran for approximately **2 minutes 20 seconds** before
-  interruption: 3 successful samples, 5 failed samples, no observation
-  advancement and null memory metrics. No completed 30-hour trial is recorded
-  in the available artifacts.
-- Final candidate image digests, native architecture qualification and release
-  publication are still outstanding.
+- Service implementation commit `18f565599f814215e42f5ee47a79294834229e4d` is
+  SSH-signed and verified locally. This is an implementation checkpoint, not the
+  final frozen candidate.
+- Locked restores, Release build/publish and published-content audit pass.
+  All 124 deterministic cases passed across an initial run (122 passed) and
+  focused reruns after repairing an invalid synthetic PNG fixture and a test
+  that observed failure before cleanup completed.
+- All ten Chromium/demo cases executed: eight initially passed, then two demo
+  assertions were corrected to respect disabled navigation and relative-time
+  display. Focused reruns passed. The production cases exercise concurrent
+  context leases, cancellation, abrupt Chromium crash and recreation.
+- The dependency vulnerability audit completed and reported no vulnerable
+  packages using the configured sources.
+- The replacement runner has 66 pure checks and 11 live native/container
+  fixtures. Success, failure, interruption, abrupt supervisor loss and outer
+  timeout have verified cleanup evidence. No inherited process group or cgroup
+  is treated as task-owned.
+- Verifier/soak helper checks pass, including simulated 30-hour completion.
+  Simulated time is not a real trial. Earlier Pomona/two-location reports and
+  the interrupted two-minute soak do not qualify the current candidate.
 
-Review found remaining backend gaps in reserved-directory/nested symlink
-containment, malformed metadata handling, PNG validation beyond the header,
-browser setup cancellation, refresh admission during startup/shutdown, and
-location/time-input validation. The demo also still has duplicate refresh
-timers, incomplete network-outage recovery, and failure details overwritten by
-its relative-time update. These limitations need fixes and regression coverage
-before release qualification. Card-side work is listed in the
-[HA handoff](docs/ha-handoff/README.md).
+Native amd64 image qualification, fresh two-location checks, fault/restart/rollback
+exercises and the full 30-hour trial remain outstanding. No candidate image has
+been frozen or published. ARM64 testing is explicitly deferred. Card/HA
+implementation remains deferred; its [handoff](docs/ha-handoff/README.md) is
+unchanged by this service work.
 
 ### Release and rollback
 

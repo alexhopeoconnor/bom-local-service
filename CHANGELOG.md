@@ -7,7 +7,11 @@ describe candidate source changes, not published container tags.
 
 Stability work intended to preserve existing routes, JSON fields, cache folder
 names and saved image URLs. The candidate is not published or release-qualified.
-The latest GitHub release remains `v0.0.6` as of 2026-11-13.
+The latest GitHub release remains `v0.0.6` as of 2026-11-15.
+
+The follow-up service-only implementation is tracked in the
+[qualification register](docs/service-qualification.md). Its cleanup, freshness,
+recovery and progression criteria must be demonstrated before qualification.
 
 ### Changed
 
@@ -19,9 +23,9 @@ The latest GitHub release remains `v0.0.6` as of 2026-11-13.
 - Cache lookup, deletion, startup recovery and retention now resolve recognised
   direct-child folders with containment, ownership and symlink checks. Unknown
   directories are preserved.
-- Captures publish through an on-filesystem staging folder after metadata,
-  frame-index and PNG-header checks. Readers use one snapshot; full PNG decoding
-  and malformed-metadata handling remain review gaps.
+- Captures publish through an on-filesystem staging folder. Follow-up source adds
+  bounded metadata and full PNG validation before publication, with corrupt
+  snapshots rejected individually; corruption and fallback regressions pass.
 - Background refresh now has one bounded queue owner with per-location
   deduplication, capture deadlines, retry backoff and shutdown cancellation.
 - Historical selection filters by inclusive UTC observation bounds, keeps exact
@@ -42,39 +46,40 @@ The latest GitHub release remains `v0.0.6` as of 2026-11-13.
 ### Fixed
 
 - Added rejection and isolation checks for wildcard, traversal, absolute-path,
-  wrong-location and top-level snapshot symlink requests. Reserved-directory and
-  nested symlink containment still need work.
+  wrong-location, reserved-directory and nested snapshot symlink requests.
+  Focused outside-sentinel cases pass.
 - Incomplete or failed captures no longer replace the previous complete
   snapshot.
 - Frame indices are validated against configuration and the selected snapshot
   instead of a hard-coded `0..6` range.
 - Capture status records bounded failure details and retry timing, then clears
-  failure fields after recovery. The demo still has a status-rendering gap.
+  failure fields after recovery. Follow-up demo source preserves failure details
+  across relative-time updates and uses one polling owner.
 - The latest-data 404 path no longer reads the response body twice.
 
 ### Validation to date
 
-- Locked restores, the Release build/publish and 66 deterministic tests passed
-  on 2026-11-13. Package vulnerability feeds were unavailable (`NU1900`), so a
-  dependency vulnerability audit was not completed. Tests use
-  real controllers and cache code, synthetic PNGs and a controllable capture;
-  they do not exercise the real browser capture lifecycle.
-- One explicit demo browser test passed on 2026-11-12 with intercepted API
-  fixtures. It does not cover actual service outages or live BOM capture.
-- Saved Pomona verification used an intermediate service on port 18083. Earlier
-  two-location baseline results do not qualify the final candidate.
-- The saved soak was interrupted after approximately 2 minutes 20 seconds,
-  with 3 successful samples, 5 failed samples, no observation advancement and
-  null memory metrics. No completed 30-hour trial is recorded in the available
-  artifacts.
-- Final candidate image, native architecture and release qualification remain
-  outstanding; no v0.1.1 release evidence or published image is available.
+- Signed service implementation checkpoint: `18f565599f814215e42f5ee47a79294834229e4d`.
+- Locked restores, Release build/publish and publication-content audit pass.
+- 124 deterministic cases pass across the initial and focused runs. Invalid
+  legacy test PNGs were repaired without relaxing image validation; the deadline
+  test now observes reservation release before asserting staging cleanup.
+- Ten real Chromium/demo cases pass across the initial and focused runs,
+  including abrupt Chromium crash/recreation and outage recovery.
+- Dependency audit completed with no vulnerable packages reported.
+- Replacement runner: independent source audit, 66 pure checks, 11 live
+  native/container cases and verified teardown. The initial runner's ambient
+  cgroup incident is documented in the qualification register.
+- Fifty verifier/soak checks pass. Thirty-hour simulations do not qualify a trial.
+- Candidate/promotion helper checks pass; no registry writes were performed.
 
 ### Known limitations
 
-Remaining review findings include reserved-directory/nested symlink containment,
-malformed metadata, header-only PNG validation, browser setup cancellation,
-refresh admission during startup/shutdown, and location/time-input validation.
-The demo still has duplicate polling, incomplete network-outage recovery and a
-failure-detail rendering issue. See the README's candidate validation section
-and the [HA handoff](docs/ha-handoff/README.md) for the related card work.
+The final candidate is not frozen or qualified. Native amd64 image evidence,
+fresh two-location verification, fault/restart/rollback exercises and the actual
+30-hour trial remain pending. Resource-growth acceptance thresholds need short
+baselines before freeze. Path validation does not eliminate concurrent filesystem
+replacement races; browser cleanup that never returns remains bounded/best-effort
+inside the service, with owned runner teardown as the test boundary. ARM64 testing
+and card/HA implementation are deferred. See the
+[qualification register](docs/service-qualification.md) for evidence and limits.

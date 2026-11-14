@@ -16,12 +16,15 @@
 **/docker-compose*
 **/Dockerfile*
 **/node_modules
+**/__pycache__
+**/*.py[cod]
 **/npm-debug.log
 **/obj
 **/secrets.dev.yaml
 **/values.dev.yaml
 cache/
 tests/
+scripts/test_*.py
 artifacts/
 **/TestResults/
 **/*.trx

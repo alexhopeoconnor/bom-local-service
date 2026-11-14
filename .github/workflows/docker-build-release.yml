@@ -1,183 +1,193 @@
-name: Publish Docker image
+name: Promote tested image
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag to publish
+        description: Existing release tag (must equal v<MSBuild Version>)
         required: true
+        type: string
+      candidate_run_id:
+        description: Run whose candidate-manifest artifact is already qualified (live and runner evidence bound)
+        required: true
+        type: string
+      confirm:
+        description: Repeat the tag to authorize publication
+        required: true
+        type: string
+      update_latest:
+        description: Move latest to this stable version if it advances; otherwise leave latest unchanged
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+# Publication is serialized repository-wide. Per-tag concurrency is not enough
+# because latest is a shared reference and must advance monotonically.
+#
+# The candidate-manifest artifact must already be qualified: service-checks
+# produces an unqualified manifest by design, and later live/runner evidence is
+# bound and qualified by the coordinator before this workflow is dispatched.
+concurrency:
+  group: image-promotion
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  validate:
+  promote:
+    name: Promote exact tested content
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
+      actions: read
+      packages: write
     steps:
       - name: Checkout release revision
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag }}
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
+      - name: Validate release authorization
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          CONFIRM_TAG: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TAG"
+          if [[ "$RELEASE_TAG" != "$CONFIRM_TAG" ]]; then
+            echo "confirm input must repeat the release tag exactly" >&2
+            exit 1
+          fi
+          version="$(python3 scripts/prepare-candidate.py version --csproj BomLocalService.csproj)"
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "release tag $RELEASE_TAG must equal v<MSBuild Version> (v$version)" >&2
+            exit 1
+          fi
+
+      - name: Download candidate manifest
+        uses: actions/download-artifact@v4
         with:
-          dotnet-version: 10.0.x
-          global-json-file: global.json
+          name: candidate-manifest
+          path: artifacts/candidate
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Locked restore
-        run: |
-          dotnet restore BomLocalService.csproj --locked-mode
-          dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode
-
-      - name: Test
-        run: |
-          dotnet test tests/BomLocalService.Tests/BomLocalService.Tests.csproj \
-            --configuration Release --no-restore \
-            --logger trx --results-directory artifacts/test-results
-
-      - name: Publish
-        run: |
-          dotnet publish BomLocalService.csproj \
-            --configuration Release --no-restore --output artifacts/publish
-
-      - name: Verify release version
+      - name: Read candidate architecture scope
+        id: scope
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
-          test -f artifacts/publish/BomLocalService.dll
-          test ! -e artifacts/publish/tests
-          test ! -e artifacts/publish/global.json
-          test -n "$tag"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
 
-  build-smoke-publish-image:
-    needs: validate
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            arch: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    steps:
-      - name: Checkout release revision
-        uses: actions/checkout@v5
+          manifest = json.load(open("artifacts/candidate/candidate.json"))
+          print(
+              "include_arm64="
+              + ("true" if "arm64" in manifest.get("images", {}) else "false")
+          )
+          PY
+
+      - name: Download amd64 tested archive
+        uses: actions/download-artifact@v4
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          name: candidate-image-amd64
+          path: artifacts/images/amd64
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Download arm64 tested archive
+        if: ${{ steps.scope.outputs.include_arm64 == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-image-arm64
+          path: artifacts/images/arm64
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to the Container registry
+      - name: Verify qualified candidate against this revision
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          ( cd artifacts/candidate && sha256sum -c candidate.json.sha256 )
+          archive_args=(--archive-dir "amd64=artifacts/images/amd64")
+          if [[ -d artifacts/images/arm64 ]]; then
+            archive_args+=(--archive-dir "arm64=artifacts/images/arm64")
+          fi
+          python3 scripts/prepare-candidate.py verify \
+            --candidate artifacts/candidate/candidate.json \
+            --candidate-dir artifacts/candidate \
+            --source-dir . \
+            "${archive_args[@]}" \
+            --require-files \
+            --require-archives \
+            --require-all-arches \
+            --require-qualified \
+            --require-unpublished
+          version="$(python3 scripts/prepare-candidate.py show \
+            --candidate artifacts/candidate/candidate.json --field version)"
+          if [[ "$RELEASE_TAG" != "v$version" ]]; then
+            echo "candidate version $version does not match release tag $RELEASE_TAG" >&2
+            exit 1
+          fi
+          candidate_commit="$(python3 scripts/prepare-candidate.py show \
+            --candidate artifacts/candidate/candidate.json --field source.commit)"
+          checkout_commit="$(git rev-parse HEAD)"
+          if [[ "$candidate_commit" != "$checkout_commit" ]]; then
+            echo "candidate source $candidate_commit does not match release revision $checkout_commit" >&2
+            exit 1
+          fi
+
+      - name: Log in to the container registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build one native image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          load: true
-          push: false
-          tags: bom-local-service:release-${{ matrix.arch }}
-
-      - name: Smoke-test the native image
+      - name: Promote exact image IDs
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          UPDATE_LATEST: ${{ inputs.update_latest }}
         run: |
           set -euo pipefail
-          cache="$(mktemp -d)"
-          docker run -d --name "bom-release-${{ matrix.arch }}" \
-            --publish 127.0.0.1:18082:8080 \
-            --mount "type=bind,source=$cache,target=/app/cache" \
-            --shm-size=1g --env DEBUG__ENABLED=false \
-            "bom-local-service:release-${{ matrix.arch }}"
-          cleanup() { docker rm -f "bom-release-${{ matrix.arch }}" >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          for _ in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:18082/api/health >/dev/null; then break; fi
-            sleep 2
-          done
-          curl -fsS http://127.0.0.1:18082/api/health
-          curl -fsS http://127.0.0.1:18082/api/ready | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="ready"'
-          docker exec "bom-release-${{ matrix.arch }}" dotnet --list-runtimes | grep -E '^Microsoft\.AspNetCore\.App 10\.'
-          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' bom-local-service:release-${{ matrix.arch }})" = "linux/${{ matrix.arch }}"
+          args=(
+            --candidate artifacts/candidate/candidate.json
+            --candidate-dir artifacts/candidate
+            --source-dir .
+            --archive-dir "amd64=artifacts/images/amd64"
+            --tag "$RELEASE_TAG"
+            --registry "$REGISTRY"
+            --repository "$IMAGE_NAME"
+            --authorize "$RELEASE_TAG"
+            --execute
+            --result artifacts/promotion/promotion-result.json
+          )
+          if [[ -d artifacts/images/arm64 ]]; then
+            args+=(--archive-dir "arm64=artifacts/images/arm64")
+          fi
+          if [[ "$UPDATE_LATEST" == "true" ]]; then
+            args+=(--update-latest)
+          fi
+          python3 scripts/promote-candidate.py "${args[@]}"
 
-      - name: Publish the exact tested image
-        id: publish
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
-          arch_tag="${REGISTRY}/${IMAGE_NAME}:${tag}-${{ matrix.arch }}"
-          docker tag "bom-local-service:release-${{ matrix.arch }}" "$arch_tag"
-          push_output="$(docker push "$arch_tag")"
-          printf '%s\n' "$push_output"
-          digest="$(printf '%s\n' "$push_output" | awk '/digest:/ {print $3; exit}')"
-          test -n "$digest"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "tag=$arch_tag" >> "$GITHUB_OUTPUT"
-
-      - name: Attest tested architecture image
-        uses: actions/attest-build-provenance@v3
+      - name: Upload promotion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.publish.outputs.digest }}
-          push-to-registry: true
-
-  publish-manifest:
-    needs: [validate, build-smoke-publish-image]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
-    steps:
-      - name: Log in to the Container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Merge tested architecture images
-        id: merge
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
-          docker buildx imagetools create \
-            --tag "${REGISTRY}/${IMAGE_NAME}:${tag}" \
-            --tag "${REGISTRY}/${IMAGE_NAME}:latest" \
-            "${REGISTRY}/${IMAGE_NAME}:${tag}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${tag}-arm64"
-          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${tag}"
-          digest="$(docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${tag}" | awk '/^Digest:/{print $2; exit}')"
-          test -n "$digest"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Attest merged release index
-        uses: actions/attest-build-provenance@v3
-        with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.merge.outputs.digest }}
-          push-to-registry: true
+          name: promotion-evidence
+          path: artifacts/promotion
+          if-no-files-found: warn

@@ -2,46 +2,387 @@ name: Live BOM verification
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 20 * * *"
+    inputs:
+      candidate_run_id:
+        description: Workflow run that produced the exact candidate archives
+        required: true
+        type: string
+      arch:
+        description: Architecture whose tested archive is verified
+        required: true
+        type: choice
+        options: [amd64, arm64]
+        default: amd64
+      check:
+        description: Location evidence to record
+        required: true
+        type: choice
+        options: [live-pomona, live-sydney]
+        default: live-pomona
 
 permissions:
   contents: read
+  actions: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
 
 jobs:
-  live-bom:
+  plan:
+    name: Validate dedicated runner labels
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      runner_labels: ${{ steps.labels.outputs.runner_labels }}
     steps:
-      - name: Checkout
+      - name: Validate BOM_DEDICATED_RUNNER_LABELS
+        id: labels
+        shell: bash
+        env:
+          DEDICATED_RUNNER_LABELS: ${{ vars.BOM_DEDICATED_RUNNER_LABELS }}
+          RUNNER_APPROVED: ${{ vars.BOM_RUNNER_APPROVED }}
+        run: |
+          set -euo pipefail
+          labels="$(python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          if os.environ.get("RUNNER_APPROVED", "").lower() != "true":
+              print(json.dumps(["self-hosted", "runner-disabled"], separators=(",", ":")))
+              raise SystemExit(0)
+          raw = os.environ.get("DEDICATED_RUNNER_LABELS", "").strip()
+          if not raw:
+              sys.exit(
+                  "repository variable BOM_DEDICATED_RUNNER_LABELS must be a JSON "
+                  "array of dedicated-runner labels"
+              )
+          try:
+              labels = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              sys.exit(f"BOM_DEDICATED_RUNNER_LABELS is not valid JSON: {exc}")
+          if (
+              not isinstance(labels, list)
+              or not labels
+              or not all(isinstance(item, str) and item.strip() for item in labels)
+          ):
+              sys.exit(
+                  "BOM_DEDICATED_RUNNER_LABELS must be a non-empty JSON array of strings"
+              )
+          if "self-hosted" not in labels:
+              sys.exit(
+                  "BOM_DEDICATED_RUNNER_LABELS must include 'self-hosted'; "
+                  "hosted runners do not provide a user systemd manager"
+              )
+          print(json.dumps(labels, separators=(",", ":")))
+          PY
+          )"
+          echo "runner_labels=$labels" >> "$GITHUB_OUTPUT"
+
+  live:
+    name: Live ${{ inputs.check }} on ${{ inputs.arch }}
+    needs: plan
+    if: ${{ vars.BOM_RUNNER_APPROVED == 'true' }}
+    runs-on: ${{ fromJSON(needs.plan.outputs.runner_labels) }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout tooling
         uses: actions/checkout@v5
 
-      - name: Build image
-        run: docker build -t bom-local-service:live .
+      - name: Download candidate manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-manifest
+          path: artifacts/candidate
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run live verification
+      - name: Check out candidate source revision
         shell: bash
         run: |
           set -euo pipefail
-          cache="$(mktemp -d)"
-          docker run -d --name bom-live --publish 127.0.0.1:18082:8080 \
-            --mount "type=bind,source=$cache,target=/app/cache" \
-            --shm-size=1g --env DEBUG__ENABLED=false --env CACHEMANAGEMENT__INITIALDELAYSECONDS=3600 \
-            bom-local-service:live
-          cleanup() { docker rm -f bom-live >/dev/null 2>&1 || true; }
-          trap cleanup EXIT
-          for _ in $(seq 1 40); do
-            curl -fsS http://127.0.0.1:18082/api/health >/dev/null && break
-            sleep 2
-          done
-          ./scripts/verify-service.sh \
-            --base-url http://127.0.0.1:18082 \
-            --suburb Pomona \
-            --state QLD \
-            --output artifacts/verification
+          # The service verifier compares the checkout with candidate.source.commit.
+          # Fetch the exact candidate revision so a live report can be eligible.
+          # A pull-request merge commit is not fetchable by SHA; qualify from a
+          # pushed branch/tag candidate run instead.
+          commit="$(python3 scripts/prepare-candidate.py show \
+            --candidate artifacts/candidate/candidate.json --field source.commit)"
+          if ! git rev-parse --verify --quiet "$commit^{commit}" >/dev/null; then
+            git fetch --no-tags --depth=1 origin "$commit"
+          fi
+          git checkout --detach "$commit"
 
-      - name: Upload live verification
+      - name: Download tested archive
+        uses: actions/download-artifact@v4
+        with:
+          name: candidate-image-${{ inputs.arch }}
+          path: artifacts/images/${{ inputs.arch }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify candidate identity and archive
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          ( cd artifacts/candidate && sha256sum -c candidate.json.sha256 )
+          python3 scripts/prepare-candidate.py verify \
+            --candidate artifacts/candidate/candidate.json \
+            --candidate-dir artifacts/candidate \
+            --source-dir . \
+            --archive-dir "$CANDIDATE_ARCH=artifacts/images/$CANDIDATE_ARCH" \
+            --archive-arch "$CANDIDATE_ARCH" \
+            --require-files \
+            --require-archives \
+            --require-all-arches \
+            --require-unpublished
+
+      - name: Load the exact tested archive
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          manifest="artifacts/candidate/candidate.json"
+          expected_id="$(python3 scripts/prepare-candidate.py show --candidate "$manifest" --field "images.$CANDIDATE_ARCH.imageId")"
+          archive_name="$(python3 scripts/prepare-candidate.py show --candidate "$manifest" --field "images.$CANDIDATE_ARCH.archive")"
+          archive_sha="$(python3 scripts/prepare-candidate.py show --candidate "$manifest" --field "images.$CANDIDATE_ARCH.archiveSha256")"
+          archive="artifacts/images/$CANDIDATE_ARCH/$archive_name"
+          echo "$archive_sha  $archive" | sha256sum -c -
+          docker load --input "$archive"
+          loaded_id="$(docker image inspect --format '{{.Id}}' "$expected_id")"
+          test "$loaded_id" = "$expected_id"
+          platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$expected_id")"
+          test "$platform" = "linux/$CANDIDATE_ARCH"
+          {
+            echo "EXPECTED_IMAGE_ID=$expected_id"
+            echo "EXPECTED_PLATFORM=$platform"
+          } >> "$GITHUB_ENV"
+
+      - name: Runner preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/runner-work
+          ./scripts/run-service-test.sh preflight | tee artifacts/runner-work/preflight.json
+          python3 - artifacts/runner-work/preflight.json <<'PY' >> "$GITHUB_ENV"
+          import json
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if not data.get("systemd", {}).get("ok") or not data.get("cgroup2"):
+              raise SystemExit("dedicated systemd user manager and cgroup2 are required")
+          print(f"RUNNER_VERSION={data.get('runnerVersion') or 'unknown'}")
+          PY
+
+      - name: Prepare bounded live verification command
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ inputs.arch }}
+          CHECK_NAME: ${{ inputs.check }}
+        run: |
+          set -euo pipefail
+          case "$CHECK_NAME" in
+            live-pomona) suburb="Pomona"; state="QLD" ;;
+            live-sydney) suburb="Sydney"; state="NSW" ;;
+            *) echo "unsupported check $CHECK_NAME" >&2; exit 1 ;;
+          esac
+          candidate_id="$(python3 scripts/prepare-candidate.py show \
+            --candidate artifacts/candidate/candidate.json --field candidateId)"
+          archive_name="$(python3 scripts/prepare-candidate.py show \
+            --candidate artifacts/candidate/candidate.json \
+            --field "images.$CANDIDATE_ARCH.archive")"
+          cat > artifacts/runner-work/live-test.sh <<SH
+          #!/usr/bin/env bash
+          set -euo pipefail
+          : "\${BOM_TEST_BASE_URL:?runner did not inject BOM_TEST_BASE_URL}"
+          args=(
+            --base-url "\$BOM_TEST_BASE_URL"
+            --suburb "$suburb"
+            --state "$state"
+            --candidate-json "artifacts/candidate/candidate.json"
+            --architecture "$CANDIDATE_ARCH"
+            --image-id "$EXPECTED_IMAGE_ID"
+            --image-archive "artifacts/images/$CANDIDATE_ARCH/$archive_name"
+            --output "artifacts/live/$candidate_id"
+          )
+          bash scripts/verify-service.sh "\${args[@]}"
+          SH
+          chmod +x artifacts/runner-work/live-test.sh
+          {
+            echo "CANDIDATE_ID=$candidate_id"
+            echo "LIVE_SUBURB=$suburb"
+            echo "LIVE_STATE=$state"
+          } >> "$GITHUB_ENV"
+
+      - name: Run live verification through dedicated unit
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          ./scripts/run-service-test.sh run \
+            --mode container \
+            --image "$EXPECTED_IMAGE_ID" \
+            --compose-file docker-compose.test.yml \
+            --test-command "artifacts/runner-work/live-test.sh" \
+            --test-env "PATH=$PATH" \
+            --max-duration 60m \
+            --outer-timeout 75m \
+            --cpu-quota 200% \
+            --memory-max 2G \
+            --tasks-max 512 \
+            --cpus 2.0 \
+            --memory-limit 2g \
+            --pids-limit 512 \
+            --detach > artifacts/runner-work/run.json
+          RUN_ID="$(python3 - artifacts/runner-work/run.json <<'PY'
+          import json
+          import re
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if data.get("status") != "started":
+              raise SystemExit(f"runner did not start: {data}")
+          if data.get("clientDisconnectedSafe") is not True:
+              raise SystemExit("runner did not confirm detached safety")
+          if not re.fullmatch(r"\d{8}T\d{6}Z-[0-9a-f]{8}", data.get("runId") or ""):
+              raise SystemExit(f"invalid runner run id: {data.get('runId')!r}")
+          for key in ("evidenceDir", "unit", "invocationId", "controlGroup"):
+              if not data.get(key):
+                  raise SystemExit(f"runner omitted {key}")
+          print(data["runId"])
+          PY
+          )"
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          python3 - artifacts/runner-work/run.json <<'PY' >> "$GITHUB_ENV"
+          import json
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          print(f"RUNNER_UNIT={data['unit']}")
+          print(f"RUNNER_INVOCATION_ID={data['invocationId']}")
+          print(f"RUNNER_CONTROL_GROUP={data['controlGroup']}")
+          PY
+
+      - name: Wait for bounded runner completion
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUN_ID:-}"
+          ./scripts/run-service-test.sh wait --run-id "$RUN_ID" | tee artifacts/runner-work/wait.json
+
+      - name: Explicit runner cleanup
+        if: ${{ always() && env.RUN_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/run-service-test.sh cleanup --run-id "$RUN_ID" | tee artifacts/runner-work/cleanup.json
+
+      - name: Observe terminal runner state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RUN_ID:-}"
+          ./scripts/run-service-test.sh status --run-id "$RUN_ID" | tee artifacts/runner-work/status.json
+          python3 - artifacts/runner-work/status.json <<'PY'
+          import json
+          import sys
+
+          data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if data.get("bindingCurrent") is not True:
+              raise SystemExit("runner binding is not current")
+          if data.get("identityVerified") is not True:
+              raise SystemExit("runner unit identity is not verified")
+          completion = data.get("completion") or {}
+          if completion.get("verified") is not True:
+              raise SystemExit("runner final observation is not verified")
+          if data.get("effectiveStatus") != "passed":
+              raise SystemExit(f"runner observed status is {data.get('effectiveStatus')!r}")
+          finalization = data.get("finalization") or {}
+          cleanup = finalization.get("cleanup") or {}
+          if cleanup.get("destructiveOk") is not True:
+              raise SystemExit("runner cleanup is not verified")
+          PY
+
+      - name: Validate verification report and bind live evidence
+        shell: bash
+        env:
+          CANDIDATE_ARCH: ${{ inputs.arch }}
+          CHECK_NAME: ${{ inputs.check }}
+        run: |
+          set -euo pipefail
+          report="artifacts/live/$CANDIDATE_ID/report.json"
+          test -f "$report" || { echo "::error::live verification report missing" >&2; exit 1; }
+          python3 - "$report" <<'PY'
+          import json
+          import sys
+
+          report = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          if report.get("status") != "passed":
+              raise SystemExit(f"live verification failed: {report.get('error')}")
+          qualification = report.get("qualification") or {}
+          if not qualification.get("eligible"):
+              reasons = "; ".join(qualification.get("reasons") or ["not eligible"])
+              raise SystemExit(f"live verification is not qualified: {reasons}")
+          PY
+          verification_sha="$(sha256sum "$report" | awk '{print $1}')"
+          run_dir="artifacts/execution/runner/runs/$RUN_ID"
+          for name in ownership.json unit-identity.json boundary.json summary.json finalization.json; do
+            test -f "$run_dir/$name" || { echo "::error::runner evidence missing $name" >&2; exit 1; }
+          done
+          mkdir -p artifacts/live-evidence
+          python3 scripts/prepare-candidate.py write-report \
+            --check "$CHECK_NAME" \
+            --status passed \
+            --source-commit "$(python3 scripts/prepare-candidate.py show \
+              --candidate artifacts/candidate/candidate.json --field source.commit)" \
+            --arch "$CANDIDATE_ARCH" \
+            --detail "verificationReportSha256=$verification_sha" \
+            --detail "location=$LIVE_SUBURB,$LIVE_STATE" \
+            --detail "runnerVersion=$RUNNER_VERSION" \
+            --detail "runnerRunId=$RUN_ID" \
+            --detail "runnerUnit=$RUNNER_UNIT" \
+            --detail "runnerInvocationId=$RUNNER_INVOCATION_ID" \
+            --detail "runnerControlGroup=$RUNNER_CONTROL_GROUP" \
+            --detail "runnerOwnershipSha256=$(sha256sum "$run_dir/ownership.json" | awk '{print $1}')" \
+            --detail "runnerUnitIdentitySha256=$(sha256sum "$run_dir/unit-identity.json" | awk '{print $1}')" \
+            --detail "runnerBoundarySha256=$(sha256sum "$run_dir/boundary.json" | awk '{print $1}')" \
+            --detail "runnerSummarySha256=$(sha256sum "$run_dir/summary.json" | awk '{print $1}')" \
+            --detail "runnerFinalizationSha256=$(sha256sum "$run_dir/finalization.json" | awk '{print $1}')" \
+            --detail "runnerCompletionVerified=true" \
+            --detail "runnerCleanupDestructiveOk=true" \
+            --output artifacts/live-evidence/report.json
+          cp -a artifacts/candidate artifacts/live-candidate
+          python3 scripts/prepare-candidate.py record-report \
+            --candidate artifacts/live-candidate/candidate.json \
+            --candidate-dir artifacts/live-candidate \
+            --report artifacts/live-evidence/report.json
+          ( cd artifacts/live-candidate && sha256sum candidate.json > candidate.json.sha256 )
+          cp artifacts/live-candidate/candidate.json artifacts/live-evidence/candidate.json
+          printf '%s\n' "$verification_sha" > artifacts/live-evidence/verification.sha256
+
+      - name: Upload live evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: live-verification
-          path: artifacts/verification
+          name: live-evidence-${{ inputs.arch }}-${{ inputs.check }}
+          path: |
+            artifacts/live
+            artifacts/live-candidate
+            artifacts/live-evidence
+          if-no-files-found: warn
+
+      - name: Upload runner evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-evidence-${{ inputs.arch }}-${{ inputs.check }}
+          path: |
+            artifacts/runner-work
+            artifacts/execution/runner/runs
+          if-no-files-found: warn

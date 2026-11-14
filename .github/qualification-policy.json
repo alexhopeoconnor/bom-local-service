@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "qualificationDurationSeconds": 108000,
+  "outerLifetimeSeconds": 111600,
+  "maxFreshnessSeconds": 1800,
+  "futureSkewSeconds": 120,
+  "recoverySeconds": 1800,
+  "maxProgressGapSeconds": 3600,
+  "requestConnectTimeoutSeconds": 5,
+  "requestTimeoutSeconds": 30,
+  "captureWaitSeconds": 660,
+  "cpuLimit": 2.0,
+  "memoryLimitBytes": 2147483648,
+  "unresolvedCriteria": [
+    "browser process count baseline",
+    "sustained memory growth",
+    "retention/cache growth baseline"
+  ],
+  "requiredArchitectures": [
+    "amd64"
+  ],
+  "deferredArchitectures": [
+    "arm64"
+  ],
+  "architectureScopeReason": "User explicitly deferred ARM64 testing on 2026-11-15."
+}

@@ -1,30 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 BASE_URL=""
 SUBURB="Pomona"
 STATE="QLD"
 OUTPUT="artifacts/verification"
 EXPECTED_FRAMES="7"
-WAIT_SECONDS="240"
+WAIT_SECONDS="660"
+MAX_FRESHNESS_SECONDS="1800"
+FUTURE_SKEW_SECONDS="120"
+MAX_IMAGE_BYTES="26214400"
+CONNECT_TIMEOUT="5"
+REQUEST_TIMEOUT="30"
+CANDIDATE_JSON=""
+ARCHITECTURE=""
+IMAGE_ID=""
+IMAGE_ARCHIVE=""
+SMOKE=0
 
 usage() {
   cat <<'USAGE'
 Usage: ./scripts/verify-service.sh --base-url URL [options]
 
 Required:
-  --base-url URL          Running service base URL (e.g. http://127.0.0.1:18082)
+  --base-url URL                 Running service base URL (e.g. http://127.0.0.1:18082)
 
 Options:
-  --suburb NAME           Location suburb (default: Pomona)
-  --state ABBR            Location state (default: QLD)
-  --output DIR            Verification output directory (default: artifacts/verification)
-  --expected-frames N     Expected frames per snapshot (default: 7)
-  --wait-seconds N        Cold-start capture timeout (default: 240)
-  -h, --help              Show this help
+  --suburb NAME                  Location suburb (default: Pomona)
+  --state ABBR                   Location state (default: QLD)
+  --output DIR                   Verification output directory (default: artifacts/verification)
+  --expected-frames N            Expected frames per snapshot (default: 7)
+  --wait-seconds N               Cold-start wait (default: 660; service capture timeout 300)
+  --max-freshness-seconds N      Maximum latest-observation age (default: 1800)
+  --future-skew-seconds N        Allowed future timestamp skew (default: 120)
+  --max-image-bytes N            Maximum image payload (default: 26214400)
+  --connect-timeout N            Per-request connect timeout (default: 5)
+  --request-timeout N            Per-request total timeout (default: 30)
+  --candidate-json PATH          candidate.json schema v1 identity
+  --architecture ARCH            amd64 or arm64 (required for bound qualification)
+  --image-id ID                  Actual inspected image ID (required for bound qualification)
+  --image-archive PATH           Actual candidate archive for sidecar SHA-256 checking
+  --smoke                        Mark as smoke only; never qualification evidence
+  -h, --help                     Show this help
 
 The verifier exits nonzero when liveness, readiness, schema, timestamps,
-historical bounds, or any returned frame image fails validation.
+freshness, snapshot ownership, historical bounds, or any returned frame image
+fails validation. Missing candidate identity makes the run unqualified but does
+not fabricate identity.
 USAGE
 }
 
@@ -36,6 +61,16 @@ while [[ $# -gt 0 ]]; do
     --output) OUTPUT="${2:-}"; shift 2 ;;
     --expected-frames) EXPECTED_FRAMES="${2:-}"; shift 2 ;;
     --wait-seconds) WAIT_SECONDS="${2:-}"; shift 2 ;;
+    --max-freshness-seconds) MAX_FRESHNESS_SECONDS="${2:-}"; shift 2 ;;
+    --future-skew-seconds) FUTURE_SKEW_SECONDS="${2:-}"; shift 2 ;;
+    --max-image-bytes) MAX_IMAGE_BYTES="${2:-}"; shift 2 ;;
+    --connect-timeout) CONNECT_TIMEOUT="${2:-}"; shift 2 ;;
+    --request-timeout) REQUEST_TIMEOUT="${2:-}"; shift 2 ;;
+    --candidate-json) CANDIDATE_JSON="${2:-}"; shift 2 ;;
+    --architecture) ARCHITECTURE="${2:-}"; shift 2 ;;
+    --image-id) IMAGE_ID="${2:-}"; shift 2 ;;
+    --image-archive) IMAGE_ARCHIVE="${2:-}"; shift 2 ;;
+    --smoke) SMOKE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -50,27 +85,26 @@ fi
 BASE_URL="${BASE_URL%/}"
 mkdir -p "$OUTPUT/frames" "$OUTPUT/history"
 
-json_get() {
-  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2], {"d": d}, {"d": d}))' "$1" "$2"
-}
-
 fail() {
   echo "VERIFY FAILED: $*" >&2
   exit 1
 }
 
+bounded_curl() {
+  curl --silent --show-error \
+    --connect-timeout "$CONNECT_TIMEOUT" \
+    --max-time "$REQUEST_TIMEOUT" \
+    --max-filesize "$MAX_IMAGE_BYTES" \
+    "$@"
+}
+
 echo "== liveness and readiness =="
-health_status=$(curl -sS -o "$OUTPUT/health.txt" -w '%{http_code}' "$BASE_URL/api/health")
+health_status=$(bounded_curl -o "$OUTPUT/health.txt" -w '%{http_code}' "$BASE_URL/api/health") \
+  || fail "health request failed"
 [[ "$health_status" == "200" ]] || fail "health returned $health_status"
-ready_status=$(curl -sS -o "$OUTPUT/ready.json" -w '%{http_code}' "$BASE_URL/api/ready")
+ready_status=$(bounded_curl -o "$OUTPUT/ready.json" -w '%{http_code}' "$BASE_URL/api/ready") \
+  || fail "ready request failed"
 [[ "$ready_status" == "200" ]] || fail "ready returned $ready_status: $(cat "$OUTPUT/ready.json")"
-python3 - "$OUTPUT/ready.json" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-assert d.get("status")=="ready", d
-assert d.get("checks",{}).get("cacheWritable") is True, d
-assert d.get("checks",{}).get("refreshWorker") is True, d
-PY
 
 encoded_suburb=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$SUBURB")
 encoded_state=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$STATE")
@@ -80,16 +114,23 @@ range_url="$BASE_URL/api/cache/$encoded_suburb/$encoded_state/range"
 refresh_url="$BASE_URL/api/cache/$encoded_suburb/$encoded_state/refresh"
 
 echo "== capture =="
-status_code=$(curl -sS -o "$OUTPUT/radar-latest.json" -w '%{http_code}' "$radar_url")
+status_code=$(bounded_curl -o "$OUTPUT/radar-latest.json" -w '%{http_code}' "$radar_url") \
+  || fail "latest request failed"
 if [[ "$status_code" != "200" ]]; then
   echo "latest returned $status_code; requesting refresh"
-  curl -sS -X POST -o "$OUTPUT/refresh.json" -w 'refresh=%{http_code}\n' "$refresh_url" || true
+  refresh_status=$(bounded_curl -X POST -o "$OUTPUT/refresh.json" -w '%{http_code}' "$refresh_url") \
+    || fail "refresh request failed"
+  echo "refresh=$refresh_status"
+  if [[ "$refresh_status" == "429" ]]; then
+    fail "refresh rejected by backoff: $(cat "$OUTPUT/refresh.json")"
+  fi
   deadline=$((SECONDS + WAIT_SECONDS))
   while [[ $SECONDS -lt $deadline ]]; do
     sleep 3
-    status_code=$(curl -sS -o "$OUTPUT/radar-latest.json" -w '%{http_code}' "$radar_url")
+    status_code=$(bounded_curl -o "$OUTPUT/radar-latest.json" -w '%{http_code}' "$radar_url") \
+      || fail "latest retry failed"
     [[ "$status_code" == "200" ]] && break
-    curl -sS -o "$OUTPUT/status.json" "$status_url" || true
+    bounded_curl -o "$OUTPUT/status.json" "$status_url" || true
     if python3 - "$OUTPUT/status.json" <<'PY'
 import json,sys
 try:
@@ -105,110 +146,39 @@ PY
   [[ "$status_code" == "200" ]] || fail "no radar data after ${WAIT_SECONDS}s: $(cat "$OUTPUT/radar-latest.json")"
 fi
 
-python3 - "$OUTPUT" "$BASE_URL" "$EXPECTED_FRAMES" <<'PY'
-import hashlib,json,os,struct,sys,urllib.request
-from datetime import datetime, timezone
-
-output, base, expected_text = sys.argv[1], sys.argv[2].rstrip('/'), sys.argv[3]
-expected = int(expected_text)
-latest = json.load(open(os.path.join(output, "radar-latest.json")))
-frames = latest.get("frames") or []
-assert len(frames) == expected, f"expected {expected} frames, got {len(frames)}"
-assert latest.get("observationTime"), "missing observationTime"
-
-def parse_utc(value):
-    assert value, "missing timestamp"
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    assert parsed.tzinfo is not None, f"timestamp lacks offset: {value}"
-    return parsed.astimezone(timezone.utc)
-
-observation = parse_utc(latest["observationTime"])
-times = [parse_utc(frame["absoluteObservationTime"]) for frame in frames]
-assert times == sorted(times), f"frames not chronological: {times}"
-assert len(set(times)) == len(times), f"duplicate frame observations: {times}"
-assert all(abs((observation - value).total_seconds()) <= 7200 for value in times), "frame observation implausible relative to metadata"
-assert all("cacheFolder=" in frame.get("imageUrl", "") for frame in frames), "frame URLs do not identify a snapshot"
-
-manifest = {"frames": [], "observationTime": latest["observationTime"], "cacheFolder": None}
-for frame in frames:
-    url = frame["imageUrl"]
-    if url.startswith("/"):
-        url = base + url
-    data = urllib.request.urlopen(url, timeout=30).read()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n", f"not PNG: {url}"
-    width, height = struct.unpack(">II", data[16:24])
-    assert width > 0 and height > 0, f"invalid PNG dimensions: {url}"
-    name = f"frame_{frame['frameIndex']}.png"
-    path = os.path.join(output, "frames", name)
-    open(path, "wb").write(data)
-    manifest["frames"].append({
-        "frameIndex": frame["frameIndex"],
-        "observationTime": frame["absoluteObservationTime"],
-        "imageUrl": frame["imageUrl"],
-        "bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-        "width": width,
-        "height": height
-    })
-
-json.dump(manifest, open(os.path.join(output, "frame-manifest.json"), "w"), indent=2)
-print(f"validated {len(frames)} latest frames, observation {latest['observationTime']}")
-PY
-
 echo "== cache range and history =="
-range_status=$(curl -sS -o "$OUTPUT/range.json" -w '%{http_code}' "$range_url")
+range_status=$(bounded_curl -o "$OUTPUT/range.json" -w '%{http_code}' "$range_url") \
+  || fail "range request failed"
 [[ "$range_status" == "200" ]] || fail "range returned $range_status: $(cat "$OUTPUT/range.json")"
 
 start_time=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["frames"][0]["absoluteObservationTime"])' "$OUTPUT/radar-latest.json")
 end_time=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["frames"][-1]["absoluteObservationTime"])' "$OUTPUT/radar-latest.json")
 timeseries_url="$radar_url/timeseries?startTime=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$start_time")&endTime=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$end_time")"
-history_status=$(curl -sS -o "$OUTPUT/history/timeseries.json" -w '%{http_code}' "$timeseries_url")
+history_status=$(bounded_curl -o "$OUTPUT/history/timeseries.json" -w '%{http_code}' "$timeseries_url") \
+  || fail "timeseries request failed"
 [[ "$history_status" == "200" ]] || fail "timeseries returned $history_status: $(cat "$OUTPUT/history/timeseries.json")"
 
-python3 - "$OUTPUT" "$BASE_URL" "$start_time" "$end_time" <<'PY'
-import hashlib,json,os,struct,sys,urllib.parse,urllib.request
-from datetime import datetime, timezone
+verification_args=(
+  verify
+  --repo-root "$REPO_ROOT"
+  --base-url "$BASE_URL"
+  --suburb "$SUBURB"
+  --state "$STATE"
+  --output "$OUTPUT"
+  --expected-frames "$EXPECTED_FRAMES"
+  --wait-seconds "$WAIT_SECONDS"
+  --max-freshness-seconds "$MAX_FRESHNESS_SECONDS"
+  --future-skew-seconds "$FUTURE_SKEW_SECONDS"
+  --max-image-bytes "$MAX_IMAGE_BYTES"
+  --connect-timeout "$CONNECT_TIMEOUT"
+  --request-timeout "$REQUEST_TIMEOUT"
+  --health-status "$health_status"
+  --ready-status "$ready_status"
+)
+[[ -n "$CANDIDATE_JSON" ]] && verification_args+=(--candidate-json "$CANDIDATE_JSON")
+[[ -n "$ARCHITECTURE" ]] && verification_args+=(--architecture "$ARCHITECTURE")
+[[ -n "$IMAGE_ID" ]] && verification_args+=(--image-id "$IMAGE_ID")
+[[ -n "$IMAGE_ARCHIVE" ]] && verification_args+=(--image-archive "$IMAGE_ARCHIVE")
+[[ "$SMOKE" == "1" ]] && verification_args+=(--smoke)
 
-output, base, start_text, end_text = sys.argv[1], sys.argv[2].rstrip('/'), sys.argv[3], sys.argv[4]
-start = datetime.fromisoformat(start_text.replace("Z", "+00:00")).astimezone(timezone.utc)
-end = datetime.fromisoformat(end_text.replace("Z", "+00:00")).astimezone(timezone.utc)
-data = json.load(open(os.path.join(output, "history", "timeseries.json")))
-assert data.get("cacheFolders"), "empty cacheFolders grouping"
-assert data.get("totalFrames") == sum(len(f["frames"]) for f in data["cacheFolders"]), "totalFrames mismatch"
-manifest = []
-for folder in data["cacheFolders"]:
-    assert folder.get("cacheFolderName"), "missing cacheFolderName"
-    assert folder.get("frames"), "empty cache folder group"
-    for frame in folder["frames"]:
-        observed = datetime.fromisoformat(frame["absoluteObservationTime"].replace("Z", "+00:00")).astimezone(timezone.utc)
-        assert start <= observed <= end, f"observation {observed} outside inclusive bounds {start}..{end}"
-        assert f"cacheFolder={urllib.parse.quote(folder['cacheFolderName'], safe='')}" in frame["imageUrl"] or folder["cacheFolderName"] in frame["imageUrl"], "frame URL lost origin folder"
-        url = frame["imageUrl"] if frame["imageUrl"].startswith("http") else base + frame["imageUrl"]
-        payload = urllib.request.urlopen(url, timeout=30).read()
-        assert payload[:8] == b"\x89PNG\r\n\x1a\n", f"historical frame not PNG: {url}"
-        width, height = struct.unpack(">II", payload[16:24])
-        assert width > 0 and height > 0
-        manifest.append({
-            "cacheFolderName": folder["cacheFolderName"],
-            "frameIndex": frame["frameIndex"],
-            "observationTime": frame["absoluteObservationTime"],
-            "imageUrl": frame["imageUrl"],
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "width": width,
-            "height": height
-        })
-assert manifest, "no historical frames validated"
-json.dump(manifest, open(os.path.join(output, "history", "frame-manifest.json"), "w"), indent=2)
-print(f"validated {len(manifest)} historical frames across {len(data['cacheFolders'])} group(s)")
-PY
-
-cat > "$OUTPUT/report.json" <<EOF
-{
-  "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "baseUrl": "$BASE_URL",
-  "location": { "suburb": "$SUBURB", "state": "$STATE" },
-  "status": "passed"
-}
-EOF
-
-echo "PASS: verification report written to $OUTPUT/report.json"
+python3 "$SCRIPT_DIR/service_verification.py" "${verification_args[@]}"
