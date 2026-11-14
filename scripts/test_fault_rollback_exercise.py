@@ -102,6 +102,175 @@ class PureFaultExerciseTests(unittest.TestCase):
         status["isUpdating"] = True
         self.assertFalse(self.m.failure_predicate(status))
 
+    def test_refresh_response_fresh_noop_200_is_not_accepted(self) -> None:
+        response = {
+            "status": 200,
+            "body": {
+                "updateAccepted": False,
+                "updateTriggered": False,
+                "isUpdating": False,
+                "cacheIsValid": True,
+                "message": "Cache is valid, no update needed",
+            },
+        }
+        outcome = self.m.refresh_response_outcome(response)
+        self.assertFalse(outcome["accepted"])
+        self.assertIsNone(outcome["rejectionCode"])
+
+    def test_refresh_response_queued_or_running_is_accepted(self) -> None:
+        accepted = {
+            "status": 200,
+            "body": {
+                "updateAccepted": True,
+                "updateTriggered": True,
+                "isUpdating": True,
+                "cacheIsValid": False,
+            },
+        }
+        already_running = {
+            "status": 200,
+            "body": {
+                "updateAccepted": False,
+                "updateTriggered": False,
+                "isUpdating": True,
+                "cacheIsValid": True,
+                "message": "Cache update is in progress",
+            },
+        }
+        rejected = {
+            "status": 429,
+            "body": {
+                "updateAccepted": False,
+                "updateTriggered": False,
+                "isUpdating": False,
+                "rejectionCode": "RejectedBackoff",
+            },
+        }
+        self.assertTrue(self.m.refresh_response_outcome(accepted)["accepted"])
+        self.assertTrue(self.m.refresh_response_outcome(already_running)["accepted"])
+        self.assertFalse(self.m.refresh_response_outcome(rejected)["accepted"])
+
+    def test_refresh_window_requires_stale_or_updating_and_respects_backoff(self) -> None:
+        now = datetime.now(timezone.utc)
+        fresh = {
+            "cacheIsValid": True,
+            "isUpdating": False,
+            "nextRetryAt": None,
+        }
+        stale = {
+            "cacheIsValid": False,
+            "isUpdating": False,
+            "nextRetryAt": None,
+        }
+        updating = {
+            "cacheIsValid": True,
+            "isUpdating": True,
+            "nextRetryAt": None,
+        }
+        backoff = {
+            "cacheIsValid": False,
+            "isUpdating": False,
+            "nextRetryAt": iso(now + timedelta(seconds=60)),
+        }
+        self.assertFalse(self.m.refresh_window_ready(fresh))
+        self.assertTrue(self.m.refresh_window_ready(stale))
+        self.assertTrue(self.m.refresh_window_ready(updating))
+        self.assertFalse(self.m.refresh_window_ready(backoff))
+
+    def test_wait_for_refresh_window_records_stale_wait(self) -> None:
+        now = datetime.now(timezone.utc)
+        fresh = {"cacheIsValid": True, "isUpdating": False, "lastSuccessfulCaptureAt": iso(now)}
+        stale = {"cacheIsValid": False, "isUpdating": False, "lastSuccessfulCaptureAt": iso(now)}
+        sequence = iter([fresh, stale])
+        ticks = iter(range(100))
+        status, detail = self.m.wait_for_refresh_window(
+            "http://127.0.0.1:12345",
+            "Pomona",
+            "QLD",
+            timeout=10,
+            fetcher=lambda _base, _suburb, _state: next(sequence),
+            clock=lambda: next(ticks),
+            sleeper=lambda _seconds: None,
+        )
+        self.assertEqual(status, stale)
+        self.assertEqual(detail["reason"], "stale")
+        self.assertEqual(detail["polls"], 2)
+
+    def test_wait_for_refresh_window_stops_at_deadline(self) -> None:
+        now = datetime.now(timezone.utc)
+        fresh = {"cacheIsValid": True, "isUpdating": False, "lastSuccessfulCaptureAt": iso(now)}
+        ticks = iter(range(1000))
+        with self.assertRaises(self.m.ExerciseError):
+            self.m.wait_for_refresh_window(
+                "http://127.0.0.1:12345",
+                "Pomona",
+                "QLD",
+                timeout=2,
+                fetcher=lambda _base, _suburb, _state: fresh,
+                clock=lambda: next(ticks),
+                sleeper=lambda _seconds: None,
+            )
+
+    def test_success_newer_than_rejects_old_and_equal_success(self) -> None:
+        baseline = datetime.now(timezone.utc)
+        base_status = {
+            "updateFailed": False,
+            "isUpdating": False,
+            "consecutiveFailures": 0,
+            "nextRetryAt": None,
+        }
+        older = {**base_status, "lastSuccessfulCaptureAt": iso(baseline - timedelta(seconds=1))}
+        equal = {**base_status, "lastSuccessfulCaptureAt": iso(baseline)}
+        newer = {**base_status, "lastSuccessfulCaptureAt": iso(baseline + timedelta(seconds=1))}
+        self.assertFalse(self.m.success_newer_than(older, baseline))
+        self.assertFalse(self.m.success_newer_than(equal, baseline))
+        self.assertTrue(self.m.success_newer_than(newer, baseline))
+
+    def test_acceptance_evidence_with_datetimes_is_json_serializable(self) -> None:
+        now = datetime.now(timezone.utc)
+        acceptance = {
+            "accepted": True,
+            "baselineSuccess": now,
+            "baselineAttempt": now + timedelta(seconds=1),
+            "status": {"lastSuccessfulCaptureAt": iso(now)},
+        }
+        checks = self.m.Checks("baseline")
+        checks.record("baseline.refreshAccepted", True, acceptance)
+        target = self.root / "evidence.json"
+        self.m.write_json_exclusive(target, {"checks": checks.items})
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        detail = saved["checks"][0]["detail"]
+        self.assertEqual(detail["baselineSuccess"], iso(now))
+        self.assertEqual(detail["baselineAttempt"], iso(now + timedelta(seconds=1)))
+        self.assertIsInstance(acceptance["baselineSuccess"], datetime)
+
+    def test_failure_requires_new_attempt_after_baseline(self) -> None:
+        now = datetime.now(timezone.utc)
+        status = {
+            "updateFailed": True,
+            "isUpdating": False,
+            "errorCode": "TIMEOUT_ERROR",
+            "consecutiveFailures": 1,
+            "nextRetryAt": iso(now + timedelta(seconds=60)),
+            "lastUpdateAttempt": iso(now),
+        }
+        self.assertTrue(
+            self.m.expected_attempt_completed(
+                status,
+                baseline_success=None,
+                baseline_attempt=now - timedelta(seconds=1),
+                expected_failure=True,
+            )
+        )
+        self.assertFalse(
+            self.m.expected_attempt_completed(
+                status,
+                baseline_success=None,
+                baseline_attempt=now,
+                expected_failure=True,
+            )
+        )
+
     def test_timeout_and_success_predicates_are_distinct(self) -> None:
         now = datetime.now(timezone.utc)
         timeout = {

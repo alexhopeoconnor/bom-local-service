@@ -1,6 +1,6 @@
 # Local service qualification
 
-Status: **unreleased and unqualified; deterministic and browser checks passed; live qualification found an image permission defect; corrected candidate preparation pending**.
+Status: **unreleased and unqualified; native and two-location smoke passed; corrected timeout exercise passed; remaining fault/rollback checks pending; 30-hour trial not started**.
 
 This document tracks the agreed service-only 20-step plan. Card and Home Assistant
 implementation are deferred. Publication, GitHub writes and live deployment are
@@ -65,9 +65,14 @@ new policy identity and appropriate requalification.
 | Completion | No interruption, unresolved required check or unavailable required metric |
 | Cleanup | No remaining owned service/browser processes or containers |
 
-Process-count and sustained memory/cache-growth thresholds remain unresolved until
-short native baselines establish platform expectations. They must be recorded in
-the candidate policy before the 30-hour trial. A short completed smoke run is not
+The 15-minute two-location baseline established an observed peak of 1187558457
+bytes and eight browser processes, with six processes between captures. The
+resolved trial policy uses absolute caps of 1792 MiB, 12 browser processes and
+1 GiB cache growth. These allow bounded headroom over measured behavior, not a
+claim of zero memory growth; policy and baseline hashes are retained in the
+candidate manifest. The committed policy remains a preparation template until
+the final evidence handoff; the resolved candidate policy is authoritative for
+its trial. A short completed smoke run is not
 a qualifying trial. Fault windows and removal times must be explicit in evidence;
 ordinary outages cannot be silently reclassified as planned faults.
 
@@ -131,7 +136,24 @@ up; this was not a successful live qualification run. Archive hashing now uses
 1 MiB blocks. All 72 helper tests pass, and a real archive hash probe matched the
 retained checksum at a process peak RSS of 23796 KiB. Evidence is under
 `artifacts/execution/archive-hashing/`. The amended scripts need a new candidate
-identity before continuing qualification.
+identity before continuing qualification. Source `5e8dc30` includes that bounded
+hashing fix. Its retained image passed native smoke and two real captures each
+for Pomona and Sydney, including a wider history query with exact ownership,
+inclusive bounds and nine deduplicated observations per location. The 15-minute
+baseline and all associated disposable runs completed with verified teardown.
+
+The timeout exercise then exposed a fixture error: HTTP 200 from a refresh POST
+against a fresh cache means no work was needed, not that a capture started.
+Fault exercises must observe real admission and a result newer than their
+baseline. A seeded snapshot's inferred successful-capture time is not evidence
+of a new live capture. Normal cache expiry and backoff remain part of the checks;
+the tests do not add a force-refresh API or shorten production freshness.
+The corrected timeout exercise passed on the retained `5e8dc30` image: admission
+was explicit, a new attempt recorded `TIMEOUT_ERROR`, its reservation and staging
+were released, and the fallback remained readable. Run
+`20261114T201419Z-63f42fc3` completed with verified cleanup. The helper's 35 pure
+checks also pass. These results validate the correction; the next candidate
+must retain the corrected helper identity for the remaining exercises.
 
 ## Ordered completion register
 
@@ -148,13 +170,13 @@ identity before continuing qualification.
 | 9 | Durable monitoring and DELETE | Durable save, failure, DELETE and restart assertions passed | Save-failure, DELETE and restart tests |
 | 10 | Demo recovery and polling | Six demo browser scenarios passed across initial/focused runs | Browser assertions |
 | 11 | Explicit browser execution | Ten cases executed with no skips; owned teardown verified | Dedicated browser TRX and cleanup |
-| 12 | Provenance-aware live verifier | 72 pure checks pass across shared verifier/soak code; live verification unexecuted | Negative fixtures and candidate report |
+| 12 | Provenance-aware live verifier | 72 pure checks pass; two-location live smoke passed; final policy-bound reports pending | Negative fixtures and candidate report |
 | 13 | Honest soak metrics and qualification | Actual-loop simulations pass after summary and progression corrections; no real trial run | Duration/interruption/recovery fixtures |
 | 14 | CI checks and unconditional teardown | Local checks and workflow integration pass; GitHub jobs not dispatched | Workflow validation and local equivalent checks |
 | 15 | Exact-image promotion automation | Exact amd64 image exported and reloaded; promotion unexecuted | Candidate exports and promotion checks |
-| 16 | Signed source and frozen candidate | Signed source through 0b14872; its retained image failed live qualification; replacement required | Signature output; candidate manifest |
-| 17 | Native amd64 image and two locations | Seeded image smoke passed; real capture found Node permission failure; two-location checks pending; ARM64 deferred | amd64 and per-location reports |
-| 18 | Fault/restart/upgrade/rollback | Helper implemented; 27 pure tests pass; mutation boundary reviewed; live exercises unverified | Isolated exercise reports |
+| 16 | Signed source and frozen candidate | Signed source through 5e8dc30; corrected retained image passed native/live smoke; fixture changes require a new frozen identity | Signature output; candidate manifest |
+| 17 | Native amd64 image and two locations | Corrected native image and two captures each for Pomona/Sydney passed, including wider history; final policy-bound reports pending; ARM64 deferred | amd64 and per-location reports |
+| 18 | Fault/restart/upgrade/rollback | Legacy backup and corrected timeout stages passed with verified cleanup; main fault, upgrade and rollback pending | Isolated exercise reports |
 | 19 | Complete 30-hour trial | Not started | Samples, summary and teardown report |
 | 20 | Evidence and publication material | Pending qualification | Release notes and gap list |
 

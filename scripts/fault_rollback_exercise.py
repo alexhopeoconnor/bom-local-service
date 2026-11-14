@@ -91,6 +91,10 @@ CAPTURE_WAIT_SECONDS = 660
 FAULT_STATUS_WAIT_SECONDS = 120
 READY_WAIT_SECONDS = 600
 STAGING_WAIT_SECONDS = 180
+FRESH_WAIT_SECONDS = 900
+STATUS_POLL_SECONDS = 1.0
+TIMEOUT_SEED_AGE_SECONDS = 3600
+MAX_COMPLETED_WAIT_CYCLES = 1
 HTTP_CONNECT_TIMEOUT = 5.0
 HTTP_TOTAL_TIMEOUT = 30.0
 MAX_EVIDENCE_BYTES = 1024 * 1024
@@ -111,6 +115,19 @@ def utc_now() -> datetime:
 
 def utc_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def evidence_safe(value: Any) -> Any:
+    """Make check/evidence details safe for the strict JSON writer."""
+    if isinstance(value, datetime):
+        return utc_text(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): evidence_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [evidence_safe(item) for item in value]
+    return value
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -498,7 +515,7 @@ class Checks:
         self.items.append({
             "name": name,
             "ok": bool(ok),
-            "detail": detail,
+            "detail": evidence_safe(detail),
             "classification": classification,
             "required": bool(required),
         })
@@ -633,6 +650,264 @@ def success_predicate(status: dict[str, Any]) -> bool:
     if status_value(status, "nextRetryAt") is not None:
         return False
     return status_value(status, "lastSuccessfulCaptureAt") is not None
+
+
+def refresh_response_outcome(response: dict[str, Any]) -> dict[str, Any]:
+    """Classify a refresh POST without treating a plain HTTP 200 as acceptance.
+
+    TriggerCacheUpdateAsync returns 200 for a fresh cache with all three flags
+    false. Only an explicit accepted/updating response is a real admission.
+    """
+    status = response.get("status")
+    body = response.get("body")
+    rejection = status_value(body, "rejectionCode")
+    accepted = (
+        status == 200
+        and isinstance(body, dict)
+        and (
+            status_value(body, "updateAccepted") is True
+            or status_value(body, "updateTriggered") is True
+            or status_value(body, "isUpdating") is True
+        )
+        and (rejection is None or rejection == "AlreadyInProgress")
+    )
+    return {
+        "accepted": accepted,
+        "status": status,
+        "rejectionCode": rejection,
+        "updateAccepted": status_value(body, "updateAccepted"),
+        "updateTriggered": status_value(body, "updateTriggered"),
+        "isUpdating": status_value(body, "isUpdating"),
+        "cacheIsValid": status_value(body, "cacheIsValid"),
+        "message": status_value(body, "message"),
+    }
+
+
+def refresh_window_ready(status: dict[str, Any] | None) -> bool:
+    """True when a read-only status permits a real capture request now."""
+    if not isinstance(status, dict):
+        return False
+    if status_value(status, "isUpdating") is True:
+        return True
+    if status_value(status, "cacheIsValid") is not False:
+        return False
+    retry = parse_status_time(status, "nextRetryAt")
+    return retry is None or retry <= utc_now()
+
+
+def success_newer_than(status: dict[str, Any] | None, baseline: datetime | None) -> bool:
+    """Require a completed success strictly after the pre-trigger baseline."""
+    if not success_predicate(status):
+        return False
+    current = parse_status_time(status, "lastSuccessfulCaptureAt")
+    return current is not None and (baseline is None or current > baseline)
+
+
+def attempt_newer_than(status: dict[str, Any] | None, baseline: datetime | None) -> bool:
+    current = parse_status_time(status, "lastUpdateAttempt")
+    return current is not None and (baseline is None or current > baseline)
+
+
+def expected_attempt_completed(
+    status: dict[str, Any] | None,
+    *,
+    baseline_success: datetime | None,
+    baseline_attempt: datetime | None,
+    expected_failure: bool,
+) -> bool:
+    if expected_failure:
+        return failure_predicate(status) and attempt_newer_than(status, baseline_attempt)
+    return success_newer_than(status, baseline_success)
+
+
+def wait_for_refresh_window(
+    base: str,
+    suburb: str,
+    state: str,
+    *,
+    timeout: int = FRESH_WAIT_SECONDS,
+    baseline_success: datetime | None = None,
+    baseline_attempt: datetime | None = None,
+    expected_failure: bool = False,
+    fetcher: Callable[[str, str, str], dict[str, Any] | None] | None = None,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Poll read-only status until the cache is stale or an expected attempt is done."""
+    fetch = fetcher or get_status
+    monotonic = clock or time.monotonic
+    pause = sleeper or time.sleep
+    started_at = utc_now()
+    deadline = monotonic() + timeout
+    last: dict[str, Any] | None = None
+    polls = 0
+    while True:
+        last = fetch(base, suburb, state)
+        polls += 1
+        observed_at = utc_now()
+        if isinstance(last, dict):
+            if expected_attempt_completed(
+                last,
+                baseline_success=baseline_success,
+                baseline_attempt=baseline_attempt,
+                expected_failure=expected_failure,
+            ):
+                reason = "completed-failure" if expected_failure else "completed-success"
+                return last, {
+                    "reason": reason,
+                    "polls": polls,
+                    "startedAt": utc_text(started_at),
+                    "observedAt": utc_text(observed_at),
+                    "waitedSeconds": (observed_at - started_at).total_seconds(),
+                    "baselineSuccess": utc_text(baseline_success) if baseline_success else None,
+                    "baselineAttempt": utc_text(baseline_attempt) if baseline_attempt else None,
+                }
+            if refresh_window_ready(last):
+                reason = "updating" if status_value(last, "isUpdating") is True else "stale"
+                return last, {
+                    "reason": reason,
+                    "polls": polls,
+                    "startedAt": utc_text(started_at),
+                    "observedAt": utc_text(observed_at),
+                    "waitedSeconds": (observed_at - started_at).total_seconds(),
+                    "baselineSuccess": utc_text(baseline_success) if baseline_success else None,
+                    "baselineAttempt": utc_text(baseline_attempt) if baseline_attempt else None,
+                }
+        if monotonic() >= deadline:
+            raise ExerciseError(
+                f"refresh window not ready within {timeout}s after {polls} status reads; last={last}"
+            )
+        pause(STATUS_POLL_SECONDS)
+
+
+def resolve_refresh_acceptance(
+    base: str,
+    suburb: str,
+    state: str,
+    response: dict[str, Any],
+    *,
+    baseline_success: datetime | None,
+    baseline_attempt: datetime | None,
+    expected_failure: bool,
+    allow_completed: bool,
+) -> dict[str, Any]:
+    """Accept only explicit admission or an already-completed expected attempt."""
+    outcome = refresh_response_outcome(response)
+    if outcome["accepted"]:
+        return {"accepted": True, "reason": "response", "outcome": outcome, "status": None}
+    current = get_status(base, suburb, state)
+    if allow_completed and expected_attempt_completed(
+        current,
+        baseline_success=baseline_success,
+        baseline_attempt=baseline_attempt,
+        expected_failure=expected_failure,
+    ):
+        return {
+            "accepted": True,
+            "reason": "completed-attempt",
+            "outcome": outcome,
+            "status": current,
+        }
+    return {"accepted": False, "reason": "not-accepted", "outcome": outcome, "status": current}
+
+
+def trigger_recapture(
+    base: str,
+    suburb: str,
+    state: str,
+    *,
+    label: str,
+    checks: Checks,
+    baseline_success: datetime | None,
+    baseline_attempt: datetime | None,
+    expected_failure: bool = False,
+    allow_completed: bool = True,
+    wait_timeout: int = FRESH_WAIT_SECONDS,
+    max_completed_cycles: int = MAX_COMPLETED_WAIT_CYCLES,
+    classification: str = "real",
+    acceptance_check: str | None = None,
+) -> dict[str, Any]:
+    """Wait for a refresh window, then require a real admission/new attempt."""
+    acceptance_name = acceptance_check or f"{label}.refreshAccepted"
+    success_baseline = baseline_success
+    attempt_baseline = baseline_attempt
+    completed_cycles = 0
+    while True:
+        window_status, wait_detail = wait_for_refresh_window(
+            base,
+            suburb,
+            state,
+            timeout=wait_timeout,
+            baseline_success=success_baseline,
+            baseline_attempt=attempt_baseline,
+            expected_failure=expected_failure,
+        )
+        wait_name = f"{label}.staleWait" if completed_cycles == 0 else f"{label}.staleWait{completed_cycles + 1}"
+        checks.record(wait_name, True, wait_detail, classification)
+        if wait_detail["reason"].startswith("completed"):
+            if allow_completed:
+                acceptance = {
+                    "accepted": True,
+                    "reason": "completed-attempt",
+                    "outcome": None,
+                    "status": window_status,
+                    "response": None,
+                    "wait": wait_detail,
+                    "baselineSuccess": success_baseline,
+                    "baselineAttempt": attempt_baseline,
+                }
+                checks.record(f"{label}.completedAttempt", True, acceptance, classification)
+                checks.require(acceptance_name, True, acceptance, classification)
+                return acceptance
+            completed_cycles += 1
+            if completed_cycles > max_completed_cycles:
+                checks.require(
+                    acceptance_name,
+                    False,
+                    {
+                        "reason": "completed-background-success-without-capture-window",
+                        "status": window_status,
+                        "wait": wait_detail,
+                    },
+                )
+            checks.record(f"{label}.completedAttempt{completed_cycles}", True, {
+                "status": window_status,
+                "wait": wait_detail,
+            }, classification)
+            success_baseline = parse_status_time(window_status, "lastSuccessfulCaptureAt")
+            attempt_baseline = parse_status_time(window_status, "lastUpdateAttempt")
+            continue
+
+        response = trigger_refresh(base, suburb, state)
+        acceptance = resolve_refresh_acceptance(
+            base,
+            suburb,
+            state,
+            response,
+            baseline_success=success_baseline,
+            baseline_attempt=attempt_baseline,
+            expected_failure=expected_failure,
+            allow_completed=allow_completed,
+        )
+        acceptance["wait"] = wait_detail
+        acceptance["baselineSuccess"] = success_baseline
+        acceptance["baselineAttempt"] = attempt_baseline
+        acceptance["response"] = response
+        if acceptance["accepted"]:
+            checks.require(acceptance_name, True, acceptance, classification)
+            return acceptance
+        if not allow_completed and success_newer_than(
+            acceptance.get("status"), success_baseline
+        ):
+            completed_cycles += 1
+            if completed_cycles > max_completed_cycles:
+                checks.require(acceptance_name, False, acceptance, classification)
+            checks.record(f"{label}.completedAttempt{completed_cycles}", True, acceptance, classification)
+            success_baseline = parse_status_time(acceptance.get("status"), "lastSuccessfulCaptureAt")
+            attempt_baseline = parse_status_time(acceptance.get("status"), "lastUpdateAttempt")
+            continue
+        checks.require(acceptance_name, False, acceptance, classification)
+        raise AssertionError("unreachable")
 
 
 def validate_radar(
@@ -1141,19 +1416,55 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
     checks.require("readiness.initial", ready.get("ok") is True, ready)
     checks.record("readiness.body", True, ready.get("body"))
 
-    trigger = trigger_refresh(base, suburb, state)
-    checks.require("baseline.refreshAccepted", trigger.get("status") == 200, trigger)
-    baseline_status, baseline_detail = wait_status(base, suburb, state, success_predicate, CAPTURE_WAIT_SECONDS)
+    baseline_status_before = get_status(base, suburb, state)
+    baseline_success_before = parse_status_time(baseline_status_before, "lastSuccessfulCaptureAt")
+    baseline_attempt_before = parse_status_time(baseline_status_before, "lastUpdateAttempt")
+    baseline_folders_before = complete_folder_hashes(cache_dir)
+    checks.record("baseline.statusBefore", True, baseline_status_before)
+    baseline_acceptance = trigger_recapture(
+        base,
+        suburb,
+        state,
+        label="baseline",
+        checks=checks,
+        baseline_success=baseline_success_before,
+        baseline_attempt=baseline_attempt_before,
+        expected_failure=False,
+        allow_completed=True,
+    )
+    baseline_status, baseline_detail = wait_status(
+        base,
+        suburb,
+        state,
+        lambda status: success_newer_than(status, baseline_acceptance["baselineSuccess"]),
+        CAPTURE_WAIT_SECONDS,
+    )
     baseline_last = parse_status_time(baseline_status, "lastSuccessfulCaptureAt")
-    checks.require("baseline.success", baseline_last is not None, baseline_detail)
+    checks.require(
+        "baseline.success",
+        baseline_last is not None
+        and (baseline_success_before is None or baseline_last > baseline_success_before),
+        baseline_detail,
+    )
     radar = fetch_radar(base, suburb, state)
     baseline_radar = validate_radar(base, radar.get("body"), suburb=suburb, state=state, require_fresh=True)
     checks.record("baseline.radar", True, baseline_radar, "real-bom")
     baseline_folders = complete_folder_hashes(cache_dir)
     checks.require("baseline.folders", len(baseline_folders) >= 1, baseline_folders)
+    checks.require(
+        "baseline.newFolder",
+        baseline_radar["cacheFolder"] not in baseline_folders_before,
+        {"before": sorted(baseline_folders_before), "captured": baseline_radar["cacheFolder"]},
+    )
 
     sydney = seed_legacy_snapshot(cache_dir, suburb="Sydney", state="NSW", when=utc_now() - timedelta(minutes=1))
     checks.record("sydney.seed", True, sydney, "synthetic")
+
+    failure_status_before = get_status(base, suburb, state)
+    failure_success_before = parse_status_time(failure_status_before, "lastSuccessfulCaptureAt")
+    failure_attempt_before = parse_status_time(failure_status_before, "lastUpdateAttempt")
+    failure_folders_before = complete_folder_hashes(cache_dir)
+    checks.record("failure.statusBefore", True, failure_status_before)
 
     checks.require(
         "fault.mode.fault",
@@ -1161,12 +1472,32 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
         None,
         "controlled",
     )
-    failure_trigger = trigger_refresh(base, suburb, state)
-    checks.require("failure.refreshAccepted", failure_trigger.get("status") == 200, failure_trigger)
+    failure_acceptance = trigger_recapture(
+        base,
+        suburb,
+        state,
+        label="failure",
+        checks=checks,
+        baseline_success=failure_success_before,
+        baseline_attempt=failure_attempt_before,
+        expected_failure=True,
+        allow_completed=True,
+    )
     failed_status, failed_detail = wait_status(
-        base, suburb, state, failure_predicate, FAULT_STATUS_WAIT_SECONDS
+        base,
+        suburb,
+        state,
+        lambda status: failure_predicate(status)
+        and attempt_newer_than(status, failure_acceptance["baselineAttempt"]),
+        FAULT_STATUS_WAIT_SECONDS,
     )
     checks.record("failure.status", True, failed_detail)
+    checks.require(
+        "failure.newAttempt",
+        attempt_newer_than(failed_status, failure_attempt_before),
+        {"before": utc_text(failure_attempt_before) if failure_attempt_before else None,
+         "after": status_value(failed_status, "lastUpdateAttempt")},
+    )
     failed_retry = status_value(failed_status, "nextRetryAt")
     fallback = fetch_radar(base, suburb, state)
     fallback_radar = validate_radar(base, fallback.get("body"), suburb=suburb, state=state, require_fresh=False)
@@ -1175,8 +1506,8 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
     checks.require("folders.noIncompleteAfterFailure", incomplete_folders(cache_dir) == [], incomplete_folders(cache_dir))
     checks.require(
         "folders.noPartialAfterFailure",
-        set(complete_folder_hashes(cache_dir)) == set(baseline_folders) | {sydney["folder"]},
-        {"before": sorted(baseline_folders), "after": sorted(complete_folder_hashes(cache_dir))},
+        set(complete_folder_hashes(cache_dir)) == set(failure_folders_before),
+        {"before": sorted(failure_folders_before), "after": sorted(complete_folder_hashes(cache_dir))},
     )
 
     immediate = trigger_refresh(base, suburb, state)
@@ -1240,17 +1571,21 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
     checks.record("restart.stateFileBefore", True, pomona_state_before)
 
     checks.require("recovery.modeRedirect", fault_mode(manifest, run_id=run_id, token=token, value="redirect") == "redirect", None, "controlled")
+    recovery_folders_before = complete_folder_hashes(cache_dir)
     recovery_status, recovery_detail = wait_status(
         base,
         suburb,
         state,
-        lambda status: success_predicate(status)
-        and (parse_status_time(status, "lastSuccessfulCaptureAt") or datetime.min.replace(tzinfo=timezone.utc))
-        > (baseline_last or datetime.min.replace(tzinfo=timezone.utc)),
+        lambda status: success_newer_than(status, baseline_last),
         RECOVERY_SECONDS,
     )
     recovery_radar = validate_radar(
         base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=True
+    )
+    checks.require(
+        "recovery.newFolder",
+        recovery_radar["cacheFolder"] not in recovery_folders_before,
+        {"before": sorted(recovery_folders_before), "captured": recovery_radar["cacheFolder"]},
     )
     window = recovery_window(fault_removed, utc_now())
     checks.require("recovery.window", window["ok"] is True, window, "real-bom")
@@ -1258,8 +1593,20 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
     checks.record("recovery.radar", True, recovery_radar, "real-bom")
 
     checks.require("staging.modeRedirect", fault_mode(manifest, run_id=run_id, token=token, value="redirect") == "redirect", None, "controlled")
-    staging_trigger = trigger_refresh(base, suburb, state)
-    checks.require("staging.refreshAccepted", staging_trigger.get("status") == 200, staging_trigger)
+    staging_status_before = get_status(base, suburb, state)
+    staging_success_before = parse_status_time(staging_status_before, "lastSuccessfulCaptureAt")
+    staging_attempt_before = parse_status_time(staging_status_before, "lastUpdateAttempt")
+    trigger_recapture(
+        base,
+        suburb,
+        state,
+        label="staging",
+        checks=checks,
+        baseline_success=staging_success_before,
+        baseline_attempt=staging_attempt_before,
+        expected_failure=False,
+        allow_completed=False,
+    )
     deadline = time.monotonic() + STAGING_WAIT_SECONDS
     staging: list[str] = []
     while time.monotonic() < deadline:
@@ -1292,18 +1639,42 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
         all(post_kill_folders.get(name) == digest for name, digest in pre_kill_folders.items()),
         {"before": pre_kill_folders, "after": post_kill_folders},
     )
-    checks.require("staging.validSnapshotServed", True, validate_radar(
-        base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=False
-    ))
+    kill_status_before = get_status(base, suburb, state)
+    kill_success_before = parse_status_time(kill_status_before, "lastSuccessfulCaptureAt")
+    kill_attempt_before = parse_status_time(kill_status_before, "lastUpdateAttempt")
     install_after_kill = install_fault_server(manifest, run_id=run_id, token=token)
     checks.record("staging.faultServer", True, install_after_kill, "controlled")
     checks.require("staging.mode", fault_mode(manifest, run_id=run_id, token=token, value="redirect") == "redirect", None, "controlled")
+    checks.require("staging.validSnapshotServed", True, validate_radar(
+        base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=False
+    ))
 
-    kill_trigger = trigger_refresh(base, suburb, state)
-    checks.require("stagingRecovery.accepted", kill_trigger.get("status") == 200, kill_trigger)
-    kill_status, kill_detail = wait_status(base, suburb, state, success_predicate, RECOVERY_SECONDS)
+    kill_acceptance = trigger_recapture(
+        base,
+        suburb,
+        state,
+        label="stagingRecovery",
+        checks=checks,
+        baseline_success=kill_success_before,
+        baseline_attempt=kill_attempt_before,
+        expected_failure=False,
+        allow_completed=True,
+        acceptance_check="stagingRecovery.accepted",
+    )
+    kill_status, kill_detail = wait_status(
+        base,
+        suburb,
+        state,
+        lambda status: success_newer_than(status, kill_acceptance["baselineSuccess"]),
+        RECOVERY_SECONDS,
+    )
     kill_radar = validate_radar(
         base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=True
+    )
+    checks.require(
+        "stagingRecovery.newFolder",
+        kill_radar["cacheFolder"] not in post_kill_folders,
+        {"before": sorted(post_kill_folders), "captured": kill_radar["cacheFolder"]},
     )
     kill_window = recovery_window(kill_recovery_start, utc_now())
     checks.require("stagingRecovery.window", kill_window["ok"] is True, kill_window)
@@ -1319,14 +1690,40 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
     (cache_dir / ".service").write_text("exercise-unavailable\n", encoding="utf-8")
     checks.record("state.faultInjected", True, {"file": str(cache_dir / ".service"), "backup": str(state_backup)}, "controlled")
     try:
-        state_fault_trigger = trigger_refresh(base, suburb, state)
-        checks.require("state.faultRefreshAccepted", state_fault_trigger.get("status") == 200, state_fault_trigger)
-        state_success, state_detail = wait_status(base, suburb, state, success_predicate, CAPTURE_WAIT_SECONDS)
+        state_status_before = get_status(base, suburb, state)
+        state_success_before = parse_status_time(state_status_before, "lastSuccessfulCaptureAt")
+        state_attempt_before = parse_status_time(state_status_before, "lastUpdateAttempt")
+        state_folders_before = complete_folder_hashes(cache_dir)
+        state_acceptance = trigger_recapture(
+            base,
+            suburb,
+            state,
+            label="state",
+            checks=checks,
+            baseline_success=state_success_before,
+            baseline_attempt=state_attempt_before,
+            expected_failure=False,
+            allow_completed=True,
+            acceptance_check="state.faultRefreshAccepted",
+        )
+        state_success, state_detail = wait_status(
+            base,
+            suburb,
+            state,
+            lambda status: success_newer_than(status, state_acceptance["baselineSuccess"]),
+            CAPTURE_WAIT_SECONDS,
+        )
         checks.record("state.liveSuccess", True, state_detail)
         checks.require("state.noDurableFile", state_files(cache_dir) == [], state_files(cache_dir))
-        checks.record("state.liveRadar", True, validate_radar(
+        state_radar = validate_radar(
             base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=True
-        ))
+        )
+        checks.record("state.liveRadar", True, state_radar)
+        checks.require(
+            "state.newFolder",
+            state_radar["cacheFolder"] not in state_folders_before,
+            {"before": sorted(state_folders_before), "captured": state_radar["cacheFolder"]},
+        )
         logs_state = container_logs(container_id, env, since=state_fault_started)
         warning_found = "not persisted" in logs_state or "Failed to persist" in logs_state
         checks.require(
@@ -1334,6 +1731,15 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
             warning_found,
             {"warningFound": warning_found},
         )
+        _sydney_idle, sydney_idle_detail = wait_status(
+            base,
+            "Sydney",
+            "NSW",
+            lambda status: status_value(status, "isUpdating") is not True
+            and status_value(status, "cacheExists") is True,
+            CAPTURE_WAIT_SECONDS,
+        )
+        checks.record("state.sydneyIdleBeforeDelete", True, sydney_idle_detail, "controlled")
         delete_state = delete_location(base, "Sydney", "NSW")
         checks.require("state.deleteRejected", delete_state.get("status") == 500, delete_state)
         checks.require(
@@ -1359,9 +1765,23 @@ def stage_fault(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
             os.replace(state_backup, cache_dir / ".service")
     checks.record("state.restored", (cache_dir / ".service").is_dir() and not state_backup.exists())
     checks.require("state.restoredStateFiles", len(state_files(cache_dir)) >= 1, [entry["name"] for entry in state_files(cache_dir)])
+    _sydney_recovered_idle, sydney_recovered_detail = wait_status(
+        base,
+        "Sydney",
+        "NSW",
+        lambda status: status_value(status, "isUpdating") is not True
+        and status_value(status, "cacheExists") is True,
+        CAPTURE_WAIT_SECONDS,
+    )
+    checks.record("state.sydneyIdleBeforeRecoveredDelete", True, sydney_recovered_detail, "controlled")
     delete_recovered = delete_location(base, "Sydney", "NSW")
     checks.require("state.deleteRecovered", delete_recovered.get("status") == 200, delete_recovered)
-    checks.require("state.sydneyDeleted", fetch_radar(base, "Sydney", "NSW").get("status") == 404, fetch_radar(base, "Sydney", "NSW"))
+    sydney_status = get_status(base, "Sydney", "NSW")
+    checks.require(
+        "state.sydneyDeleted",
+        sydney_status is not None and status_value(sydney_status, "cacheExists") is False,
+        sydney_status,
+    )
     checks.require("state.pomonaUnaffected", True, validate_radar(
         base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=True
     ))
@@ -1394,30 +1814,67 @@ def stage_timeout(ctx: dict[str, Any], checks: Checks) -> dict[str, Any]:
     ready = wait_http_ready(base, "/api/ready", READY_WAIT_SECONDS)
     checks.require("readiness.initial", ready.get("ok") is True, ready)
 
-    seeded = seed_legacy_snapshot(cache_dir, suburb=suburb, state=state, when=utc_now() - timedelta(minutes=1))
+    timeout_status_before = get_status(base, suburb, state)
+    timeout_success_before = parse_status_time(timeout_status_before, "lastSuccessfulCaptureAt")
+    timeout_attempt_before = parse_status_time(timeout_status_before, "lastUpdateAttempt")
+    seeded = seed_legacy_snapshot(
+        cache_dir,
+        suburb=suburb,
+        state=state,
+        when=utc_now() - timedelta(seconds=TIMEOUT_SEED_AGE_SECONDS),
+    )
     checks.record("fallback.seed", True, seeded, "synthetic")
+    seed_status = get_status(base, suburb, state)
+    checks.record("timeout.seedStatus", True, seed_status, "controlled-config")
     checks.require(
-        "fallback.seededServed",
-        True,
-        validate_radar(base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=False),
-        "synthetic",
+        "timeout.seedStale",
+        status_value(seed_status, "cacheIsValid") is False,
+        seed_status,
+        "controlled-config",
     )
     before = complete_folder_hashes(cache_dir)
-    trigger = trigger_refresh(base, suburb, state)
-    checks.require("timeout.refreshAccepted", trigger.get("status") == 200, trigger, "controlled-config")
+    timeout_acceptance = trigger_recapture(
+        base,
+        suburb,
+        state,
+        label="timeout",
+        checks=checks,
+        baseline_success=timeout_success_before,
+        baseline_attempt=timeout_attempt_before,
+        expected_failure=True,
+        allow_completed=True,
+        classification="controlled-config",
+    )
     timeout_status, timeout_detail = wait_status(
-        base, suburb, state, timeout_predicate, FAULT_STATUS_WAIT_SECONDS
+        base,
+        suburb,
+        state,
+        lambda status: timeout_predicate(status)
+        and attempt_newer_than(status, timeout_acceptance["baselineAttempt"]),
+        FAULT_STATUS_WAIT_SECONDS,
     )
     checks.record("timeout.status", True, timeout_detail, "controlled-config")
     checks.require("timeout.code", status_value(timeout_status, "errorCode") == "TIMEOUT_ERROR", timeout_detail)
+    checks.require(
+        "timeout.newAttempt",
+        attempt_newer_than(timeout_status, timeout_attempt_before),
+        {"before": utc_text(timeout_attempt_before) if timeout_attempt_before else None,
+         "after": status_value(timeout_status, "lastUpdateAttempt")},
+    )
     checks.require("timeout.reservationReleased", status_value(timeout_status, "isUpdating") is False, timeout_detail)
     checks.require("timeout.stagingEmpty", staging_entries(cache_dir) == [], staging_entries(cache_dir))
     checks.require("timeout.noIncomplete", incomplete_folders(cache_dir) == [], incomplete_folders(cache_dir))
     after = complete_folder_hashes(cache_dir)
     checks.require("timeout.noNewPartial", set(after) == set(before), {"before": before, "after": after})
-    checks.require("timeout.fallbackServed", True, validate_radar(
+    fallback_radar = validate_radar(
         base, fetch_radar(base, suburb, state).get("body"), suburb=suburb, state=state, require_fresh=False
-    ))
+    )
+    checks.require(
+        "timeout.fallbackServed",
+        fallback_radar["cacheFolder"] == seeded["folder"],
+        fallback_radar,
+        "synthetic",
+    )
     fault_exit(manifest, run_id=run_id, token=token)
     return {
         "classification": "controlled 5s capture deadline; fallback synthetic",
@@ -1502,6 +1959,16 @@ def stage_upgrade_candidate(ctx: dict[str, Any], checks: Checks) -> dict[str, An
         raise ExerciseError(f"backup copy is missing or unsafe: {backup}")
     backup_manifest = read_json(data / "backup.manifest.json")
     verify_tree_manifest(backup, backup_manifest, "backup")
+    backup_folders = complete_folder_hashes(backup)
+    expected_legacy_folder = next(
+        (name for name in backup_folders if name.startswith("Pomona_QLD_")),
+        None,
+    )
+    checks.require(
+        "upgrade.backupLegacyFolder",
+        expected_legacy_folder is not None,
+        sorted(backup_folders),
+    )
 
     stop_exact(manifest, run_id=run_id, token=token)
     clear_directory_contents(cache_dir)
@@ -1514,18 +1981,56 @@ def stage_upgrade_candidate(ctx: dict[str, Any], checks: Checks) -> dict[str, An
         base, fetch_radar(base, "Pomona", "QLD").get("body"), suburb="Pomona", state="QLD", require_fresh=False
     )
     checks.require("upgrade.legacyServed", True, legacy)
+    checks.require(
+        "upgrade.legacyFolder",
+        legacy["cacheFolder"] == expected_legacy_folder,
+        {"expected": expected_legacy_folder, "served": legacy["cacheFolder"]},
+    )
     legacy_before = complete_folder_hashes(cache_dir)
+    legacy_status = get_status(base, "Pomona", "QLD")
+    legacy_success = parse_status_time(legacy_status, "lastSuccessfulCaptureAt")
+    legacy_attempt = parse_status_time(legacy_status, "lastUpdateAttempt")
+    checks.require(
+        "upgrade.legacyBaseline",
+        legacy_success is not None,
+        {"status": legacy_status, "expectedFolder": expected_legacy_folder},
+    )
 
-    trigger = trigger_refresh(base, "Pomona", "QLD")
-    checks.require("upgrade.refreshAccepted", trigger.get("status") == 200, trigger)
+    upgrade_acceptance = trigger_recapture(
+        base,
+        "Pomona",
+        "QLD",
+        label="upgrade",
+        checks=checks,
+        baseline_success=legacy_success,
+        baseline_attempt=legacy_attempt,
+        expected_failure=False,
+        allow_completed=True,
+    )
     captured_status, captured_detail = wait_status(
-        base, "Pomona", "QLD", success_predicate, CAPTURE_WAIT_SECONDS
+        base,
+        "Pomona",
+        "QLD",
+        lambda status: success_newer_than(status, upgrade_acceptance["baselineSuccess"]),
+        CAPTURE_WAIT_SECONDS,
     )
     checks.record("upgrade.captureSuccess", True, captured_detail)
+    checks.require(
+        "upgrade.successNewer",
+        success_newer_than(captured_status, legacy_success),
+        {"legacy": legacy_success.isoformat() if legacy_success else None,
+         "captured": status_value(captured_status, "lastSuccessfulCaptureAt")},
+    )
     fresh = validate_radar(
         base, fetch_radar(base, "Pomona", "QLD").get("body"), suburb="Pomona", state="QLD", require_fresh=True
     )
     checks.record("upgrade.freshRadar", True, fresh, "real-bom")
+    checks.require(
+        "upgrade.freshDistinct",
+        fresh["cacheFolder"] != expected_legacy_folder
+        and fresh["cacheFolder"] not in legacy_before,
+        {"legacy": expected_legacy_folder, "fresh": fresh["cacheFolder"], "before": sorted(legacy_before)},
+    )
     legacy_after = complete_folder_hashes(cache_dir)
     checks.require(
         "upgrade.legacyUnchanged",
