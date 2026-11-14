@@ -121,7 +121,7 @@ must use the same retained image bytes and the frozen policy/configuration.
 | 15 | Exact-image promotion automation | Preparation/promotion helpers verified; image export/promotion unexecuted | Candidate exports and promotion checks |
 | 16 | Signed source and frozen candidate | Signed implementation checkpoint 18f5655; final freeze pending | Signature output; candidate manifest |
 | 17 | Native amd64 image and two locations | Unverified; ARM64 deferred | amd64 and per-location reports |
-| 18 | Fault/restart/upgrade/rollback | Unverified | Isolated exercise reports |
+| 18 | Fault/restart/upgrade/rollback | Helper implemented; 27 pure tests pass; mutation boundary reviewed; live exercises unverified | Isolated exercise reports |
 | 19 | Complete 30-hour trial | Not started | Samples, summary and teardown report |
 | 20 | Evidence and publication material | Pending qualification | Release notes and gap list |
 

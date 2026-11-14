@@ -138,6 +138,7 @@ jobs:
           python3 scripts/test_candidate_release.py
           python3 scripts/test_service_verification.py
           python3 scripts/test_service_runner.py
+          python3 scripts/test_fault_rollback_exercise.py
 
       - name: Restore tests (locked)
         run: dotnet restore tests/BomLocalService.Tests/BomLocalService.Tests.csproj --locked-mode

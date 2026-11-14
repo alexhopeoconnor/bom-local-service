@@ -67,10 +67,11 @@ recovery and progression criteria must be demonstrated before qualification.
 - Ten real Chromium/demo cases pass across the initial and focused runs,
   including abrupt Chromium crash/recreation and outage recovery.
 - Dependency audit completed with no vulnerable packages reported.
-- Replacement runner: independent source audit, 66 pure checks, 11 live
+- Replacement runner: independent source audit, 67 pure checks, 11 live
   native/container cases and verified teardown. The initial runner's ambient
   cgroup incident is documented in the qualification register.
-- Fifty verifier/soak checks pass. Thirty-hour simulations do not qualify a trial.
+- Seventy verifier/soak checks pass. Thirty-hour simulations do not qualify a trial.
+- Fault/rollback helper: 27 pure checks pass; live exercises remain unverified.
 - Candidate/promotion helper checks pass; no registry writes were performed.
 
 ### Known limitations
