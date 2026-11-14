@@ -545,6 +545,7 @@ jobs:
             --mode container \
             --image "$EXPECTED_IMAGE_ID" \
             --compose-file docker-compose.test.yml \
+            --service-env CACHEMANAGEMENT__INITIALDELAYSECONDS=3600 \
             --test-command "artifacts/runner-work/native-test.sh" \
             --test-env "PATH=$PATH" \
             --max-duration 20m \

@@ -71,12 +71,33 @@ the candidate policy before the 30-hour trial. A short completed smoke run is no
 a qualifying trial. Fault windows and removal times must be explicit in evidence;
 ordinary outages cannot be silently reclassified as planned faults.
 
+## Frozen runtime configuration
+
+The owning runner records application overrides in `ownership.json` through
+`--service-env APPKEY=value`. Container mode maps approved application keys to
+Compose interpolation; inherited `BOM_TEST_*` values cannot change the run.
+Default live settings match the service: cache expiration 12.5 minutes,
+management check interval 5 minutes, initial delay 10 seconds, capture deadline
+300 seconds and backoff 60–900 seconds. The seeded image smoke explicitly uses
+an initial delay of 3600 seconds to prevent upstream captures during fixtures.
+Fault tests record their controlled URL/deadline overrides separately.
+
+The disposable container runs as the host runner UID/GID so generated cache
+files remain removable by that runner. Port, cache, image, resource and ownership
+variables remain runner-owned. A configuration-only Compose check and a live
+cache-writing container fixture verify these settings and teardown.
+
+Image preparation may collect short resource baselines before the final policy
+is frozen. A resolved policy is copied and hashed into the candidate manifest;
+preliminary baseline reports are not qualification evidence. The final trial
+must use the same retained image bytes and the frozen policy/configuration.
+
 ## Ordered completion register
 
 | Step | Requirement | Current status | Expected evidence |
 | --- | --- | --- | --- |
 | 1 | Baseline, criteria and ownership | In progress | This document; execution ledger |
-| 2 | Owning test runner and teardown | Passed: independent source audit, 66 pure checks and 11 native/container fixtures; verified teardown and empty residual inventory | Incident, pure ownership checks, then isolated fixtures |
+| 2 | Owning test runner and teardown | Passed: independent source audit, 67 pure checks and 11 native/container fixtures, plus the cache-write/UID fixture; verified teardown and empty residual inventory | Incident, pure ownership checks, then isolated fixtures |
 | 3 | Full filesystem containment | Focused containment assertions passed in first deterministic run | Outside sentinel fixtures |
 | 4 | Corruption handling and bounded PNG decode | Bounded decoder and corruption assertions passed; repaired malformed synthetic legacy PNGs pass compatibility tests | Snapshot regression tests |
 | 5 | Exact reversible location identity | Round-trip, canonical parser and capacity assertions passed | Round-trip and legacy tests |

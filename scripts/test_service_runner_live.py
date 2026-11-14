@@ -478,7 +478,9 @@ class LiveHarness:
         service = compose["services"]["service"]
         # Keep the production ownership labels, isolation and resource bounds.
         # Override only the workload: no BOM, browser, network fetch or build.
-        service["entrypoint"] = ["/bin/sh", "-c", "sleep 600 & wait"]
+        service["entrypoint"] = ["/bin/sh", "-c",
+            "set -e; mkdir -p /app/cache/owned-child; "
+            "echo cache-write > /app/cache/owned-child/sentinel; sleep 600 & wait"]
         service["command"] = []
         service["healthcheck"] = {"disable": True}
         compose_path = case_dir / "compose.yml"

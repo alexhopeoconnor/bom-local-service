@@ -922,6 +922,27 @@ class PureRunnerTests(unittest.TestCase):
         env = self.module.container_env(manifest)
         self.assertEqual(env["BOM_TEST_IMAGE"], IMAGE_ID)
         self.assertEqual(env["DOCKER_HOST"], "unix:///tmp/bom-test-docker.sock")
+        self.assertEqual(env["BOM_TEST_UID"], str(os.getuid()))
+        self.assertEqual(env["BOM_TEST_GID"], str(os.getgid()))
+
+    def test_container_settings_use_recorded_app_overrides_not_ambient_values(self):
+        manifest = self._container_manifest()
+        manifest["serviceEnv"] = self.module.parse_kv([
+            "CACHEMANAGEMENT__INITIALDELAYSECONDS=3600",
+            "CacheExpirationMinutes=12.5",
+            "SCRAPING__BASEURL=http://127.0.0.1:12345",
+        ], "--service-env")
+        with mock.patch.dict(os.environ, {
+            "BOM_TEST_CACHE_INITIAL_DELAY_SECONDS": "9999",
+            "BOM_TEST_CACHE_RETENTION_HOURS": "9999",
+        }):
+            env = self.module.container_env(manifest)
+        self.assertEqual(env["BOM_TEST_CACHE_INITIAL_DELAY_SECONDS"], "3600")
+        self.assertEqual(env["BOM_TEST_CACHE_EXPIRATION_MINUTES"], "12.5")
+        self.assertEqual(env["BOM_TEST_SCRAPING_BASE_URL"], "http://127.0.0.1:12345")
+        self.assertNotIn("BOM_TEST_CACHE_RETENTION_HOURS", env)
+        self.assertEqual(env["BOM_TEST_IMAGE"], IMAGE_ID)
+        self.assertEqual(env["BOM_TEST_CACHE_DIR"], manifest["cacheDir"])
 
     def test_container_lists_request_untruncated_ids_for_exact_equality(self):
         manifest = self._container_manifest()

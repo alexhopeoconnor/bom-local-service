@@ -116,6 +116,32 @@ RESERVED_ENV_UPPER = {
     "ASPNETCORE_URLS", "CACHEDIRECTORY", "CACHEDDIRECTORY",
     "CACHE_DIRECTORY", "DOTNET_URLS", "URLS",
 }
+# Application settings may be overridden, ownership/resource settings may not.
+# Only recorded serviceEnv values reach these compose interpolation variables.
+CONTAINER_SETTING_ENV = {
+    "ASPNETCORE_ENVIRONMENT": "BOM_TEST_ASPNETCORE_ENVIRONMENT",
+    "CORS__ALLOWEDORIGINS": "BOM_TEST_CORS_ALLOWEDORIGINS",
+    "CORS__ALLOWEDMETHODS": "BOM_TEST_CORS_ALLOWEDMETHODS",
+    "CORS__ALLOWEDHEADERS": "BOM_TEST_CORS_ALLOWEDHEADERS",
+    "CACHERETENTIONHOURS": "BOM_TEST_CACHE_RETENTION_HOURS",
+    "CACHEEXPIRATIONMINUTES": "BOM_TEST_CACHE_EXPIRATION_MINUTES",
+    "CACHEMANAGEMENT__CHECKINTERVALMINUTES": "BOM_TEST_CACHE_CHECK_INTERVAL_MINUTES",
+    "CACHEMANAGEMENT__INITIALDELAYSECONDS": "BOM_TEST_CACHE_INITIAL_DELAY_SECONDS",
+    "CACHEMANAGEMENT__LOCATIONSTAGGERSECONDS": "BOM_TEST_CACHE_LOCATION_STAGGER_SECONDS",
+    "CACHECLEANUP__INTERVALHOURS": "BOM_TEST_CACHE_CLEANUP_INTERVAL_HOURS",
+    "REFRESH__QUEUECAPACITY": "BOM_TEST_REFRESH_QUEUE_CAPACITY",
+    "REFRESH__MAXCONCURRENTCAPTURES": "BOM_TEST_REFRESH_MAX_CONCURRENT_CAPTURES",
+    "REFRESH__CAPTURETIMEOUTSECONDS": "BOM_TEST_REFRESH_CAPTURE_TIMEOUT_SECONDS",
+    "REFRESH__BACKOFFBASESECONDS": "BOM_TEST_REFRESH_BACKOFF_BASE_SECONDS",
+    "REFRESH__MAXBACKOFFSECONDS": "BOM_TEST_REFRESH_MAX_BACKOFF_SECONDS",
+    "SCREENSHOT__DYNAMICCONTENTWAITMS": "BOM_TEST_SCREENSHOT_DYNAMIC_CONTENT_WAIT_MS",
+    "SCREENSHOT__TILERENDERWAITMS": "BOM_TEST_SCREENSHOT_TILE_RENDER_WAIT_MS",
+    "DEBUG__ENABLED": "BOM_TEST_DEBUG_ENABLED",
+    "DEBUG__WAITMS": "BOM_TEST_DEBUG_WAIT_MS",
+    "SCRAPING__BASEURL": "BOM_TEST_SCRAPING_BASE_URL",
+    "TIMEZONE": "BOM_TEST_TIMEZONE",
+}
+
 DOCKER_ENV_KEYS = (
     "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG",
     "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
@@ -1094,12 +1120,19 @@ def container_env(manifest: dict) -> dict[str, str]:
         "BOM_TEST_RUNNER_VERSION": RUNNER_VERSION,
         "BOM_TEST_HOST_PORT": str(manifest["network"]["port"]),
         "BOM_TEST_CACHE_DIR": manifest["cacheDir"],
+        "BOM_TEST_UID": str(os.getuid()),
+        "BOM_TEST_GID": str(os.getgid()),
         "BOM_TEST_CPUS": str(manifest["resources"].get("cpus", "2.0")),
         "BOM_TEST_MEMORY_LIMIT": str(manifest["resources"].get("memLimit", "2g")),
         "BOM_TEST_PIDS_LIMIT": str(manifest["resources"].get("pidsLimit", 512)),
         "BOM_TEST_IMAGE": str(container.get("imageId") or ""),
     })
-    env.update(manifest.get("serviceEnv") or {})
+    service_env = manifest.get("serviceEnv") or {}
+    env.update(service_env)
+    for key, value in service_env.items():
+        compose_key = CONTAINER_SETTING_ENV.get(key.upper())
+        if compose_key is not None:
+            env[compose_key] = value
     # Docker endpoint stays pinned even if a tampered manifest smuggled a
     # serviceEnv override past normal argument validation.
     env.update(container.get("dockerEnv") or {})
