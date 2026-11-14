@@ -71,6 +71,14 @@ the candidate policy before the 30-hour trial. A short completed smoke run is no
 a qualifying trial. Fault windows and removal times must be explicit in evidence;
 ordinary outages cannot be silently reclassified as planned faults.
 
+The PNG validation memo stores at most 8192 file fingerprints and evicts one
+old entry at a time; decoded image pixels are not retained. A focused probe of
+1400 retained 1336×1024 radar PNGs reduced the second scan from 30.2 seconds and
+8.75 GB cumulative allocation to 2.0 ms and 339 KB. Six snapshot-validation cases
+pass, including revalidation after file corruption. This fixes the earlier
+512-entry whole-cache clear, which repeatedly decoded a normal two-location
+retained history. Probe figures describe that fixture, not a production SLA.
+
 ## Frozen runtime configuration
 
 The owning runner records application overrides in `ownership.json` through

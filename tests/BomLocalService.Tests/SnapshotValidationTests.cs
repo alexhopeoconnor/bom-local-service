@@ -12,6 +12,30 @@ namespace BomLocalService.Tests;
 public class SnapshotValidationTests
 {
     [Fact]
+    public void Previously_valid_png_is_revalidated_after_file_corruption()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "bom-png-memo-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "frame.png");
+            var bytes = TestPng.Create(10, 20, 30);
+            File.WriteAllBytes(path, bytes);
+            Assert.True(PngValidationHelper.IsValidPng(path));
+            var previousWrite = File.GetLastWriteTimeUtc(path);
+            bytes[^1] ^= 0xFF;
+            File.WriteAllBytes(path, bytes);
+            File.SetLastWriteTimeUtc(path, previousWrite.AddSeconds(2));
+
+            Assert.False(PngValidationHelper.IsValidPng(path));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Valid_png_passes_bounded_validation()
     {
         Assert.True(PngValidationHelper.TryValidate(TestPng.Create(10, 20, 30), out var error), error);

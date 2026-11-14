@@ -18,13 +18,16 @@ public static class PngValidationHelper
 
     private const int MaxChunks = 1024;
     private const ulong MaxInflatedBytes = 192UL * 1024 * 1024;
-    private const int MaxCacheEntries = 512;
+    // A default 24-hour history for two locations exceeds 1,300 PNGs. Keep
+    // enough fingerprints for that working set; these entries contain no pixels.
+    private const int MaxCacheEntries = 8192;
 
     private static readonly byte[] Signature = { 137, 80, 78, 71, 13, 10, 26, 10 };
     private static readonly uint[] CrcTable = CreateCrcTable();
     private static readonly object CacheGate = new();
     private static readonly Dictionary<string, (long Length, long LastWriteTicks, bool Valid)> ValidationCache =
         new(StringComparer.Ordinal);
+    private static readonly Queue<string> CacheInsertionOrder = new();
 
     public static bool IsValidPng(string path)
     {
@@ -52,9 +55,14 @@ public static class PngValidationHelper
 
             lock (CacheGate)
             {
-                if (ValidationCache.Count >= MaxCacheEntries)
+                if (!ValidationCache.ContainsKey(path))
                 {
-                    ValidationCache.Clear();
+                    if (ValidationCache.Count >= MaxCacheEntries)
+                    {
+                        ValidationCache.Remove(CacheInsertionOrder.Dequeue());
+                    }
+
+                    CacheInsertionOrder.Enqueue(path);
                 }
 
                 ValidationCache[path] = (fingerprint.Length, fingerprint.LastWriteTicks, valid);
