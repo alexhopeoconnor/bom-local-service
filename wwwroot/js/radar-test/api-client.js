@@ -122,20 +122,17 @@ export async function fetchHistoricalRadar(startTime, endTime) {
         const data = await response.json();
         state.historicalData = data;
         
-        // Flatten all frames, preserve their origin snapshot, and sort explicitly.
-        // Grouping by capture does not guarantee global order when captures overlap.
+        // Flatten all frames but keep their origin snapshot. Sort explicitly by
+        // observation time: grouping by capture does not guarantee global order
+        // when captures overlap, and every frame must stay in chronological order.
         const allFrames = data.cacheFolders
             .flatMap(cacheFolder => cacheFolder.frames.map(frame => ({
                 ...frame,
                 cacheTimestamp: cacheFolder.cacheTimestamp,
                 observationTime: cacheFolder.observationTime,
                 cacheFolderName: cacheFolder.cacheFolderName
-            })))
-            .sort((a, b) =>
-                Date.parse(a.absoluteObservationTime) -
-                Date.parse(b.absoluteObservationTime)
-            );
-        
+            })));
+
         // Filter out frames without absoluteObservationTime
         const invalidFrames = allFrames.filter(frame => !frame.absoluteObservationTime);
         if (invalidFrames.length > 0) {
@@ -149,7 +146,17 @@ export async function fetchHistoricalRadar(startTime, endTime) {
                 }))
             });
         }
-        const validFrames = allFrames.filter(frame => frame.absoluteObservationTime);
+
+        const validFrames = allFrames
+            .filter(frame => frame.absoluteObservationTime)
+            .sort((a, b) => {
+                const aTime = Date.parse(a.absoluteObservationTime);
+                const bTime = Date.parse(b.absoluteObservationTime);
+                if (Number.isNaN(aTime) && Number.isNaN(bTime)) return 0;
+                if (Number.isNaN(aTime)) return 1;
+                if (Number.isNaN(bTime)) return -1;
+                return aTime - bTime;
+            });
         
         // Validate chronological order
         let previousTime = null;
@@ -176,7 +183,7 @@ export async function fetchHistoricalRadar(startTime, endTime) {
             });
         }
         
-        // Re-index frames sequentially for display
+        // Re-index frames sequentially for display, preserving the sorted order.
         validFrames.forEach((frame, idx) => {
             frame.sequentialIndex = idx;
         });

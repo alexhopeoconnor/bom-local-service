@@ -20,8 +20,17 @@ public static class TestCache
         string distance = "10 km")
     {
         var location = LocationId.Create(suburb, state);
-        folderName ??= $"{LocationHelper.GetCacheFolderPrefix(location)}_{cacheTimestampUtc:yyyyMMdd_HHmmss}";
-        var folderPath = Path.Combine(cacheDirectory, folderName);
+        if (folderName is null)
+        {
+            if (!LocationHelper.TryGetCacheFolderBaseName(location, cacheTimestampUtc, out var generatedName, out var nameError))
+            {
+                throw new ArgumentException(nameError, nameof(suburb));
+            }
+
+            folderName = generatedName!;
+        }
+
+        var folderPath = Path.Combine(cacheDirectory, folderName!);
         var radarPath = Path.Combine(folderPath, "radar");
         Directory.CreateDirectory(radarPath);
 

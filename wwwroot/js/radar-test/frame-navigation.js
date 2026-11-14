@@ -270,10 +270,19 @@ export function showFrame(index) {
 export function findFrameToShowAfterRefresh() {
     if (state.frames.length === 0) return 0;
 
-    const previousFrames = state.previousFrames || [];
-    const previousFrameIndex = state.previousFrameIndex ?? state.currentFrameIndex;
-    if (previousFrameIndex < 0 || previousFrames.length === 0) return 0;
+    const previousFrames = Array.isArray(state.previousFrames) ? state.previousFrames : [];
+    let previousFrameIndex = Number.isInteger(state.previousFrameIndex)
+        ? state.previousFrameIndex
+        : state.currentFrameIndex;
 
+    if (previousFrames.length === 0) {
+        // First load (or recovery after an empty replacement): show a valid index.
+        const currentIndex = Number.isInteger(state.currentFrameIndex) ? state.currentFrameIndex : 0;
+        return Math.max(0, Math.min(state.frames.length - 1, currentIndex));
+    }
+
+    // A shorter replacement must still resolve a frame from the previous collection.
+    previousFrameIndex = Math.max(0, Math.min(previousFrames.length - 1, previousFrameIndex));
     const previousFrame = previousFrames[previousFrameIndex];
     if (!previousFrame) return 0;
     
@@ -284,9 +293,10 @@ export function findFrameToShowAfterRefresh() {
         );
         if (matchingIndex >= 0) return matchingIndex;
         
-        // Find closest frame by time
+        // Find closest frame by time. Start at the clamped previous index so a
+        // replacement without usable timestamps still lands on a valid frame.
         const previousTime = new Date(previousFrame.absoluteObservationTime).getTime();
-        let closestIndex = 0;
+        let closestIndex = Math.max(0, Math.min(state.frames.length - 1, previousFrameIndex));
         let closestDiff = Infinity;
         state.frames.forEach((f, idx) => {
             if (f.absoluteObservationTime) {

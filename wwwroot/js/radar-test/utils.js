@@ -121,6 +121,7 @@ export function formatFrameTime(frame, isExtendedMode) {
 export function isNetworkError(error) {
     return error.name === 'TypeError' || 
            error.name === 'AbortError' || 
+           error.name === 'TimeoutError' ||
            error.message.includes('fetch') ||
            error.message.includes('network') ||
            error.message.includes('Failed to fetch') ||

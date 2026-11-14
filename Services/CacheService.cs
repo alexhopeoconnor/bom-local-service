@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
-using System.Globalization;
+using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using BomLocalService.Models;
 using BomLocalService.Services.Interfaces;
 using BomLocalService.Utilities;
@@ -10,10 +9,6 @@ namespace BomLocalService.Services;
 
 public class CacheService : ICacheService
 {
-    private static readonly Regex StagingNamePattern = new(
-        @"^(?<prefix>.+)_(?<date>\d{8})_(?<time>\d{6})(?:_(?<suffix>[0-9a-f]{8,}))?$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     private readonly ILogger<CacheService> _logger;
     private readonly string _cacheDirectory;
     private readonly double _cacheExpirationMinutes;
@@ -24,6 +19,7 @@ public class CacheService : ICacheService
     private readonly ConcurrentQueue<double> _recentTotalDurations = new();
     private readonly ConcurrentDictionary<CacheUpdatePhase, ConcurrentQueue<double>> _phaseDurations = new();
     private readonly ConcurrentDictionary<string, ConcurrentQueue<double>> _stepDurations = new();
+    private readonly ConcurrentDictionary<string, string> _stagingLocationKeys = new(StringComparer.Ordinal);
     private readonly object _metricsLock = new();
     private const int MaxSamples = 20;
 
@@ -46,8 +42,24 @@ public class CacheService : ICacheService
         }
 
         Directory.CreateDirectory(_cacheDirectory);
-        Directory.CreateDirectory(FilePathHelper.GetStagingRoot(_cacheDirectory));
-        Directory.CreateDirectory(FilePathHelper.GetServiceStateRoot(_cacheDirectory));
+
+        if (!FilePathHelper.TryEnsureDirectChildDirectory(
+                _cacheDirectory,
+                FilePathHelper.StagingDirectoryName,
+                out _,
+                out var stagingError))
+        {
+            throw new InvalidOperationException($"Staging directory is unsafe: {stagingError}");
+        }
+
+        if (!FilePathHelper.TryEnsureDirectChildDirectory(
+                _cacheDirectory,
+                FilePathHelper.ServiceStateDirectoryName,
+                out _,
+                out var serviceError))
+        {
+            throw new InvalidOperationException($"Service state directory is unsafe: {serviceError}");
+        }
     }
 
     public string GetCacheDirectory() => _cacheDirectory;
@@ -147,44 +159,90 @@ public class CacheService : ICacheService
     public IReadOnlyList<CacheInventoryEntry> GetCacheInventory()
     {
         var entries = new List<CacheInventoryEntry>();
-        if (!Directory.Exists(_cacheDirectory))
+        if (!FilePathHelper.TryValidateCacheRoot(_cacheDirectory, out var cacheRoot, out var rootError))
+        {
+            _logger.LogWarning("Refusing to enumerate an unsafe cache root: {Error}", rootError);
+            return entries;
+        }
+
+        if (!Directory.Exists(cacheRoot))
         {
             return entries;
         }
 
-        foreach (var directory in Directory.EnumerateDirectories(_cacheDirectory))
+        string[] directories;
+        try
+        {
+            directories = Directory.GetDirectories(cacheRoot!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Could not enumerate cache root; returning an empty inventory");
+            return entries;
+        }
+
+        foreach (var directory in directories)
         {
             var folderName = Path.GetFileName(directory);
-            if (IsReservedDirectoryName(folderName))
+            if (FilePathHelper.IsReservedDirectoryName(folderName))
             {
                 continue;
             }
 
-            if (FilePathHelper.IsSymlinkOrReparsePoint(directory))
+            try
             {
-                _logger.LogWarning("Ignoring symbolic-link cache directory: {Folder}", folderName);
-                continue;
-            }
+                if (!FilePathHelper.TryResolveDirectChild(
+                        _cacheDirectory,
+                        folderName,
+                        out var resolved,
+                        out var resolveError))
+                {
+                    _logger.LogWarning(
+                        "Ignoring unsafe or missing cache directory {Folder}: {Error}",
+                        folderName,
+                        resolveError);
+                    continue;
+                }
 
-            if (!LocationHelper.TryParseCacheFolderName(folderName, out var parsed))
+                if (!LocationHelper.TryParseCacheFolderName(folderName, out var parsed))
+                {
+                    _logger.LogDebug("Ignoring unrecognised cache directory: {Folder}", folderName);
+                    continue;
+                }
+
+                if (!CacheHelper.TryResolveSnapshotIdentity(
+                        _cacheDirectory,
+                        parsed!,
+                        out var identity,
+                        out var identityError) ||
+                    identity is null)
+                {
+                    _logger.LogWarning(
+                        "Ignoring cache directory with invalid identity {Folder}: {Error}",
+                        folderName,
+                        identityError);
+                    continue;
+                }
+
+                var validation = CacheHelper.ValidateSnapshot(
+                    _cacheDirectory,
+                    resolved!.FullPath,
+                    identity,
+                    CachedDataType.Radar,
+                    _configuration,
+                    _clock.UtcNow);
+
+                entries.Add(new CacheInventoryEntry(
+                    folderName,
+                    resolved!.FullPath,
+                    identity,
+                    parsed!.CacheTimestampUtc,
+                    validation.IsValid));
+            }
+            catch (Exception ex)
             {
-                _logger.LogDebug("Ignoring unrecognised cache directory: {Folder}", folderName);
-                continue;
+                _logger.LogWarning(ex, "Ignoring cache directory that could not be inspected: {Folder}", folderName);
             }
-
-            var validation = CacheHelper.ValidateSnapshot(
-                directory,
-                parsed!.Location,
-                CachedDataType.Radar,
-                _configuration,
-                _clock.UtcNow);
-
-            entries.Add(new CacheInventoryEntry(
-                folderName,
-                directory,
-                parsed.Location,
-                parsed.CacheTimestampUtc,
-                validation.IsValid));
         }
 
         return entries
@@ -196,11 +254,33 @@ public class CacheService : ICacheService
     public string CreateStagingDirectory(LocationId location, DateTime capturedAtUtc)
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var path = FilePathHelper.GetStagingFolderPath(_cacheDirectory, location, capturedAtUtc, suffix);
-        Directory.CreateDirectory(path);
-        Directory.CreateDirectory(FilePathHelper.GetDataTypeFolderPath(path, CachedDataType.Radar));
-        _logger.LogDebug("Created staging directory for {Location}: {Path}", location, path);
-        return path;
+        if (!LocationHelper.TryGetStagingFolderName(location, capturedAtUtc, suffix, out var stagingName, out var nameError))
+        {
+            throw new InvalidCacheFolderException(nameError ?? "Could not create a staging folder name");
+        }
+
+        var stagingRoot = FilePathHelper.GetStagingRoot(_cacheDirectory);
+        if (!FilePathHelper.TryEnsureDirectChildDirectory(
+                stagingRoot,
+                stagingName!,
+                out var staging,
+                out var stagingError))
+        {
+            throw new InvalidCacheFolderException(stagingError ?? "Could not create staging directory");
+        }
+
+        if (!FilePathHelper.TryEnsureDirectChildDirectory(
+                staging!.FullPath,
+                CachedDataType.Radar.ToString().ToLowerInvariant(),
+                out _,
+                out var dataTypeError))
+        {
+            throw new InvalidCacheFolderException(dataTypeError ?? "Could not create staging data directory");
+        }
+
+        _stagingLocationKeys[staging!.FullPath] = location.Key;
+        _logger.LogDebug("Created staging directory for {Location}: {Path}", location, staging!.FullPath);
+        return staging!.FullPath;
     }
 
     public async Task SaveMetadataAsync(
@@ -208,11 +288,24 @@ public class CacheService : ICacheService
         LastUpdatedInfo metadata,
         CancellationToken cancellationToken = default)
     {
-        var metadataPath = FilePathHelper.GetMetadataFilePath(cacheFolderPath);
-        var tempPath = metadataPath + ".tmp";
+        if (!TryGetOwnedRelativePath(cacheFolderPath, out var relativeFolder, out var relativeError))
+        {
+            throw new InvalidCacheFolderException(relativeError ?? "Cache folder is not owned by this cache root");
+        }
+
+        var relativePath = $"{relativeFolder}/metadata.json";
+        if (!FilePathHelper.TryResolveOwnedPath(
+                _cacheDirectory,
+                relativePath,
+                allowMissingLeaf: true,
+                out var metadataPath,
+                out var pathError))
+        {
+            throw new InvalidCacheFolderException(pathError ?? "metadata.json path is unsafe");
+        }
+
         var json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
-        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
-        File.Move(tempPath, metadataPath, overwrite: true);
+        await WriteAtomicTextAsync(metadataPath!, json, cancellationToken);
         _logger.LogDebug("Saved metadata to: {Path}", metadataPath);
     }
 
@@ -222,6 +315,11 @@ public class CacheService : ICacheService
         List<RadarFrame> frames,
         CancellationToken cancellationToken = default)
     {
+        if (!TryGetOwnedRelativePath(cacheFolderPath, out var relativeFolder, out var relativeError))
+        {
+            throw new InvalidCacheFolderException(relativeError ?? "Cache folder is not owned by this cache root");
+        }
+
         var framesMetadata = frames.Select(frame => new FrameMetadata
         {
             FrameIndex = frame.FrameIndex,
@@ -229,17 +327,29 @@ public class CacheService : ICacheService
                 ?? throw new InvalidOperationException($"Frame {frame.FrameIndex} missing AbsoluteObservationTime")
         }).ToList();
 
-        var framesPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath, dataType);
-        var framesDirectory = Path.GetDirectoryName(framesPath);
-        if (!string.IsNullOrEmpty(framesDirectory))
+        var dataTypeFolder = dataType.ToString().ToLowerInvariant();
+        if (!FilePathHelper.TryEnsureDirectChildDirectory(
+                cacheFolderPath,
+                dataTypeFolder,
+                out _,
+                out var directoryError))
         {
-            Directory.CreateDirectory(framesDirectory);
+            throw new InvalidCacheFolderException(directoryError ?? "Could not create data type directory");
         }
 
-        var tempPath = framesPath + ".tmp";
+        var relativePath = $"{relativeFolder}/{dataTypeFolder}/frames.json";
+        if (!FilePathHelper.TryResolveOwnedPath(
+                _cacheDirectory,
+                relativePath,
+                allowMissingLeaf: true,
+                out var framesPath,
+                out var pathError))
+        {
+            throw new InvalidCacheFolderException(pathError ?? "frames.json path is unsafe");
+        }
+
         var json = JsonSerializer.Serialize(framesMetadata, new JsonSerializerOptions { WriteIndented = true });
-        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
-        File.Move(tempPath, framesPath, overwrite: true);
+        await WriteAtomicTextAsync(framesPath!, json, cancellationToken);
         _logger.LogDebug("Saved frames metadata to: {Path}", framesPath);
     }
 
@@ -250,24 +360,26 @@ public class CacheService : ICacheService
         CancellationToken cancellationToken = default)
     {
         var stagingRoot = FilePathHelper.GetStagingRoot(_cacheDirectory);
+        var stagingName = Path.GetFileName(stagingDirectory.TrimEnd(Path.DirectorySeparatorChar));
         if (!FilePathHelper.TryResolveDirectChild(
                 stagingRoot,
-                Path.GetFileName(stagingDirectory.TrimEnd(Path.DirectorySeparatorChar)),
+                stagingName,
                 out var resolvedStaging,
                 out var stagingError))
         {
             throw new InvalidCacheFolderException(stagingError ?? "Invalid staging directory");
         }
 
-        var stagingName = resolvedStaging!.FolderName;
-        if (!TryParseStagingName(stagingName, out var parsedLocation, out var capturedAtUtc) ||
-            !parsedLocation!.Equals(location))
+        if (!LocationHelper.TryParseCacheFolderName(stagingName, allowStaging: true, out var parsed) ||
+            !parsed!.IsStaging ||
+            !parsed.Location.Equals(location))
         {
             throw new InvalidCacheFolderException("Staging directory does not belong to the requested location");
         }
 
         var validation = CacheHelper.ValidateSnapshot(
-            resolvedStaging.FullPath,
+            stagingRoot,
+            resolvedStaging!.FullPath,
             location,
             dataType,
             _configuration,
@@ -277,37 +389,71 @@ public class CacheService : ICacheService
             throw new InvalidSnapshotException(validation.ErrorCode ?? "SNAPSHOT_INVALID", validation.Error ?? "Snapshot validation failed");
         }
 
-        var markerPath = FilePathHelper.GetSnapshotCompleteMarkerPath(resolvedStaging.FullPath);
-        var markerTempPath = markerPath + ".tmp";
-        var markerJson = JsonSerializer.Serialize(new
+        var marker = new SnapshotMarker
         {
-            publishedAtUtc = _clock.UtcNow,
-            location = LocationHelper.GetLocationKey(location),
-            frameCount = CacheHelper.GetFrameCountForDataType(_configuration, dataType)
-        });
-        await File.WriteAllTextAsync(markerTempPath, markerJson, cancellationToken);
-        File.Move(markerTempPath, markerPath, overwrite: true);
+            FormatVersion = 2,
+            PublishedAtUtc = _clock.UtcNow,
+            Location = LocationHelper.GetLocationKey(location),
+            Suburb = location.Suburb,
+            State = location.State,
+            FrameCount = CacheHelper.GetFrameCountForDataType(_configuration, dataType)
+        };
 
-        var finalName = FilePathHelper.GetFinalFolderName(location, capturedAtUtc);
-        var finalPath = Path.Combine(_cacheDirectory, finalName);
-        var timestamp = capturedAtUtc;
+        var markerRelative = $"{stagingName}/.complete";
+        if (!FilePathHelper.TryResolveOwnedPath(
+                stagingRoot,
+                markerRelative,
+                allowMissingLeaf: true,
+                out var markerPath,
+                out var markerError))
+        {
+            throw new InvalidCacheFolderException(markerError ?? "Completion marker path is unsafe");
+        }
+
+        var markerJson = JsonSerializer.Serialize(marker);
+        await WriteAtomicTextAsync(markerPath!, markerJson, cancellationToken);
+
+        var timestamp = parsed!.CacheTimestampUtc;
+        var finalName = string.Empty;
+        var finalPath = string.Empty;
 
         // Same-location captures are serialized by the refresh queue, but a
         // timestamp collision is still handled deterministically rather than
         // overwriting or merging with an existing snapshot.
-        for (var attempt = 0; Directory.Exists(finalPath) && attempt < 120; attempt++)
+        for (var attempt = 0; ; attempt++)
         {
+            if (!FilePathHelper.TryGetFinalFolderName(location, timestamp, out var candidateName, out var nameError))
+            {
+                throw new InvalidCacheFolderException(nameError ?? "Could not create a snapshot folder name");
+            }
+
+            if (!FilePathHelper.TryResolveOwnedPath(
+                    _cacheDirectory,
+                    candidateName!,
+                    allowMissingLeaf: true,
+                    out var candidatePath,
+                    out var candidateError))
+            {
+                throw new InvalidCacheFolderException(candidateError ?? "Snapshot destination path is unsafe");
+            }
+
+            if (!Directory.Exists(candidatePath) && !File.Exists(candidatePath))
+            {
+                finalName = candidateName!;
+                finalPath = candidatePath!;
+                break;
+            }
+
+            if (attempt >= 120)
+            {
+                throw new InvalidCacheFolderException("Could not allocate a unique snapshot folder name");
+            }
+
             timestamp = timestamp.AddSeconds(1);
-            finalName = FilePathHelper.GetFinalFolderName(location, timestamp);
-            finalPath = Path.Combine(_cacheDirectory, finalName);
         }
 
-        if (Directory.Exists(finalPath))
-        {
-            throw new InvalidCacheFolderException("Could not allocate a unique snapshot folder name");
-        }
-
-        Directory.Move(resolvedStaging.FullPath, finalPath);
+        Directory.Move(resolvedStaging!.FullPath, finalPath);
+        _stagingLocationKeys.TryRemove(resolvedStaging!.FullPath, out _);
         _logger.LogInformation("Published snapshot {Folder} for {Location}", finalName, location);
 
         if (!LocationHelper.TryParseCacheFolderName(finalName, out var finalParsed))
@@ -344,9 +490,16 @@ public class CacheService : ICacheService
                 continue;
             }
 
-            if (TryDeleteFolder(entry.FolderName, out _))
+            if (TryDeleteFolder(entry.FolderName, out var deleteError))
             {
                 deleted = true;
+            }
+            else if (!string.IsNullOrEmpty(deleteError))
+            {
+                _logger.LogWarning(
+                    "Refusing to delete unsafe or unreadable cache folder {Folder}: {Error}",
+                    entry.FolderName,
+                    deleteError);
             }
         }
 
@@ -368,7 +521,13 @@ public class CacheService : ICacheService
 
     public int CleanupIncompleteCacheFolders()
     {
-        if (!Directory.Exists(_cacheDirectory))
+        if (!FilePathHelper.TryValidateCacheRoot(_cacheDirectory, out var cacheRoot, out var rootError))
+        {
+            _logger.LogWarning("Refusing startup cache cleanup for an unsafe cache root: {Error}", rootError);
+            return 0;
+        }
+
+        if (!Directory.Exists(cacheRoot))
         {
             return 0;
         }
@@ -392,32 +551,67 @@ public class CacheService : ICacheService
         var stagingRoot = FilePathHelper.GetStagingRoot(_cacheDirectory);
         if (Directory.Exists(stagingRoot))
         {
-            foreach (var staging in Directory.EnumerateDirectories(stagingRoot))
+            if (!FilePathHelper.TryResolveDirectChild(
+                    _cacheDirectory,
+                    FilePathHelper.StagingDirectoryName,
+                    out var safeStagingRoot,
+                    out var stagingRootError))
             {
-                var name = Path.GetFileName(staging);
-                if (FilePathHelper.IsSymlinkOrReparsePoint(staging))
-                {
-                    _logger.LogWarning("Ignoring symbolic-link staging directory: {Folder}", name);
-                    continue;
-                }
-
+                _logger.LogWarning("Ignoring unsafe staging root: {Error}", stagingRootError);
+            }
+            else
+            {
+                string[] stagingDirectories;
                 try
                 {
-                    Directory.Delete(staging, recursive: true);
+                    stagingDirectories = Directory.GetDirectories(safeStagingRoot!.FullPath);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogWarning(ex, "Could not enumerate staging root");
+                    stagingDirectories = Array.Empty<string>();
+                }
+
+                foreach (var staging in stagingDirectories)
+                {
+                    var name = Path.GetFileName(staging);
+                    if (!FilePathHelper.TryDeleteOwnedTree(safeStagingRoot!.FullPath, name, out var stagingDeleteError))
+                    {
+                        _logger.LogWarning(
+                            "Refusing to remove unsafe staging folder {Folder}: {Error}",
+                            name,
+                            stagingDeleteError);
+                        continue;
+                    }
+
+                    _stagingLocationKeys.TryRemove(staging, out _);
                     deletedCount++;
                     _logger.LogInformation("Removed abandoned staging folder: {Folder}", name);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to remove abandoned staging folder: {Folder}", name);
                 }
             }
         }
 
-        foreach (var unknown in Directory.EnumerateDirectories(_cacheDirectory))
+        string[] rootDirectories;
+        try
+        {
+            if (!FilePathHelper.TryValidateCacheRoot(_cacheDirectory, out var currentRoot, out var currentRootError))
+            {
+                _logger.LogWarning("Refusing cache root diagnostics enumeration: {Error}", currentRootError);
+                return deletedCount;
+            }
+
+            rootDirectories = Directory.GetDirectories(currentRoot!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Could not enumerate cache root for unknown-directory diagnostics");
+            rootDirectories = Array.Empty<string>();
+        }
+
+        foreach (var unknown in rootDirectories)
         {
             var name = Path.GetFileName(unknown);
-            if (IsReservedDirectoryName(name) || LocationHelper.TryParseCacheFolderName(name, out _))
+            if (FilePathHelper.IsReservedDirectoryName(name) || LocationHelper.TryParseCacheFolderName(name, out _))
             {
                 continue;
             }
@@ -426,6 +620,128 @@ public class CacheService : ICacheService
         }
 
         return deletedCount;
+    }
+
+    private bool TryGetOwnedRelativePath(
+        string cacheFolderPath,
+        out string relativeFolder,
+        out string? error)
+    {
+        relativeFolder = string.Empty;
+        error = null;
+
+        try
+        {
+            var fullPath = Path.GetFullPath(cacheFolderPath.TrimEnd(Path.DirectorySeparatorChar));
+            if (!FilePathHelper.IsUnderRoot(_cacheDirectory, fullPath))
+            {
+                error = "Cache folder is outside the configured cache root";
+                return false;
+            }
+
+            var relative = Path.GetRelativePath(_cacheDirectory, fullPath);
+            if (relative == ".")
+            {
+                error = "Cache folder must not be the cache root";
+                return false;
+            }
+
+            relativeFolder = relative.Replace(Path.DirectorySeparatorChar, '/');
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            error = "Cache folder path is not valid";
+            return false;
+        }
+    }
+
+    private async Task WriteAtomicTextAsync(
+        string destinationPath,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        if (!TryGetOwnedRelativePath(destinationPath, out var relativeDestination, out var relativeError))
+        {
+            throw new InvalidCacheFolderException(relativeError ?? "Write destination is not owned by this cache root");
+        }
+
+        var tempRelativePath = relativeDestination + ".tmp";
+        string? destinationError = null;
+        string? tempError = null;
+        if (!FilePathHelper.TryResolveOwnedPath(
+                _cacheDirectory,
+                relativeDestination,
+                allowMissingLeaf: true,
+                out var safeDestination,
+                out destinationError) ||
+            !FilePathHelper.TryResolveOwnedPath(
+                _cacheDirectory,
+                tempRelativePath,
+                allowMissingLeaf: true,
+                out var tempPath,
+                out tempError))
+        {
+            throw new InvalidCacheFolderException(destinationError ?? tempError ?? "Write path is unsafe");
+        }
+
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(content);
+            await using (var stream = new FileStream(
+                             tempPath!,
+                             FileMode.Create,
+                             FileAccess.Write,
+                             FileShare.None,
+                             4096,
+                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await stream.WriteAsync(bytes, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+
+            // Revalidate from the cache root immediately before the commit. This
+            // narrows, but cannot eliminate, filesystem TOCTOU.
+            if (!FilePathHelper.TryResolveOwnedPath(
+                    _cacheDirectory,
+                    relativeDestination,
+                    allowMissingLeaf: true,
+                    out safeDestination,
+                    out destinationError) ||
+                !FilePathHelper.TryResolveOwnedPath(
+                    _cacheDirectory,
+                    tempRelativePath,
+                    allowMissingLeaf: true,
+                    out tempPath,
+                    out tempError))
+            {
+                throw new InvalidCacheFolderException(destinationError ?? tempError ?? "Write destination changed while writing");
+            }
+
+            File.Move(tempPath!, safeDestination!, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (FilePathHelper.TryResolveOwnedPath(
+                        _cacheDirectory,
+                        tempRelativePath,
+                        allowMissingLeaf: true,
+                        out var safeTempPath,
+                        out _) &&
+                    File.Exists(safeTempPath) &&
+                    !FilePathHelper.IsSymlinkOrReparsePoint(safeTempPath))
+                {
+                    File.Delete(safeTempPath);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only; never follow a replaced ancestor.
+            }
+        }
     }
 
     private bool TryResolveOwnedSnapshot(
@@ -443,20 +759,32 @@ public class CacheService : ICacheService
             return false;
         }
 
-        if (!parsed!.Location.Equals(location))
-        {
-            error = "Cache folder belongs to a different location";
-            return false;
-        }
-
         if (!FilePathHelper.TryResolveDirectChild(_cacheDirectory, folderName, out var resolved, out error))
         {
             return false;
         }
 
+        if (!CacheHelper.TryResolveSnapshotIdentity(
+                _cacheDirectory,
+                parsed!,
+                out var identity,
+                out var identityError) ||
+            identity is null)
+        {
+            error = identityError ?? "Cache folder identity is invalid";
+            return false;
+        }
+
+        if (!identity.Equals(location))
+        {
+            error = "Cache folder belongs to a different location";
+            return false;
+        }
+
         var validation = CacheHelper.ValidateSnapshot(
+            _cacheDirectory,
             resolved!.FullPath,
-            location,
+            identity,
             CachedDataType.Radar,
             _configuration,
             _clock.UtcNow);
@@ -468,9 +796,9 @@ public class CacheService : ICacheService
 
         entry = new CacheInventoryEntry(
             folderName,
-            resolved.FullPath,
-            parsed.Location,
-            parsed.CacheTimestampUtc,
+            resolved!.FullPath,
+            identity,
+            parsed!.CacheTimestampUtc,
             true);
         return true;
     }
@@ -482,26 +810,46 @@ public class CacheService : ICacheService
     {
         try
         {
-            var metadataPath = FilePathHelper.GetMetadataFilePath(entry.FolderPath);
-            var framesPath = FilePathHelper.GetFramesMetadataFilePath(entry.FolderPath, dataType);
+            var dataTypeFolder = dataType.ToString().ToLowerInvariant();
+            var metadataRelative = $"{entry.FolderName}/metadata.json";
+            var framesRelative = $"{entry.FolderName}/{dataTypeFolder}/frames.json";
 
-            var metadataJson = await File.ReadAllTextAsync(metadataPath, cancellationToken);
-            var metadata = JsonSerializer.Deserialize<LastUpdatedInfo>(metadataJson);
-            if (metadata == null)
+            if (!FilePathHelper.TryResolveOwnedPath(
+                    _cacheDirectory,
+                    metadataRelative,
+                    allowMissingLeaf: false,
+                    out var metadataPath,
+                    out _) ||
+                !CacheHelper.TryReadBoundedJson<LastUpdatedInfo>(
+                    metadataPath!,
+                    CacheHelper.MaxMetadataBytes,
+                    out var metadata,
+                    out _) ||
+                metadata is null)
             {
                 return null;
             }
 
-            var framesJson = await File.ReadAllTextAsync(framesPath, cancellationToken);
-            var frameMetadata = JsonSerializer.Deserialize<List<FrameMetadata>>(framesJson);
-            if (frameMetadata == null)
+            if (!FilePathHelper.TryResolveOwnedPath(
+                    _cacheDirectory,
+                    framesRelative,
+                    allowMissingLeaf: false,
+                    out var framesPath,
+                    out _) ||
+                !CacheHelper.TryReadBoundedJson<List<FrameMetadata?>>(
+                    framesPath!,
+                    CacheHelper.MaxFramesMetadataBytes,
+                    out var frameMetadata,
+                    out _) ||
+                frameMetadata is null ||
+                frameMetadata.Any(frame => frame is null))
             {
                 return null;
             }
 
             var byIndex = frameMetadata
-                .GroupBy(f => f.FrameIndex)
-                .ToDictionary(g => g.Key, g => g.First().ObservationTime);
+                .GroupBy(frame => frame!.FrameIndex)
+                .ToDictionary(group => group.Key, group => group.First()!.ObservationTime);
 
             var frameCount = CacheHelper.GetFrameCountForDataType(_configuration, dataType);
             var frames = new List<RadarFrame>(frameCount);
@@ -513,11 +861,21 @@ public class CacheService : ICacheService
                     return null;
                 }
 
-                var framePath = FilePathHelper.GetFrameFilePath(entry.FolderPath, dataType, index);
+                var frameRelative = $"{entry.FolderName}/{dataTypeFolder}/frame_{index}.png";
+                if (!FilePathHelper.TryResolveOwnedPath(
+                        _cacheDirectory,
+                        frameRelative,
+                        allowMissingLeaf: false,
+                        out var framePath,
+                        out _))
+                {
+                    return null;
+                }
+
                 frames.Add(new RadarFrame
                 {
                     FrameIndex = index,
-                    ImagePath = framePath,
+                    ImagePath = framePath!,
                     AbsoluteObservationTime = observation
                 });
             }
@@ -552,64 +910,14 @@ public class CacheService : ICacheService
             return false;
         }
 
-        if (!FilePathHelper.TryResolveDirectChild(_cacheDirectory, folderName, out var resolved, out error))
+        if (!FilePathHelper.TryDeleteOwnedTree(_cacheDirectory, folderName, out error))
         {
+            _logger.LogWarning("Refusing to delete unsafe cache folder {Folder}: {Error}", folderName, error);
             return false;
         }
 
-        try
-        {
-            Directory.Delete(resolved!.FullPath, recursive: true);
-            _logger.LogInformation("Deleted cached folder: {Folder}", folderName);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            error = ex.Message;
-            _logger.LogWarning(ex, "Failed to delete cache folder: {Folder}", folderName);
-            return false;
-        }
-    }
-
-    private static bool IsReservedDirectoryName(string name) =>
-        name.StartsWith('.') ||
-        string.Equals(name, "debug", StringComparison.OrdinalIgnoreCase);
-
-    private static bool TryParseStagingName(
-        string stagingName,
-        out LocationId? location,
-        out DateTime capturedAtUtc)
-    {
-        location = null;
-        capturedAtUtc = default;
-
-        var match = StagingNamePattern.Match(stagingName);
-        if (!match.Success)
-        {
-            return false;
-        }
-
-        var prefix = match.Groups["prefix"].Value;
-        var timestampText = $"{match.Groups["date"].Value}_{match.Groups["time"].Value}";
-        if (!DateTime.TryParseExact(
-                timestampText,
-                "yyyyMMdd_HHmmss",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                out capturedAtUtc))
-        {
-            return false;
-        }
-
-        var parts = prefix.Split('_');
-        if (parts.Length < 2)
-        {
-            return false;
-        }
-
-        var state = parts[^1];
-        var suburb = string.Join(' ', parts.Take(parts.Length - 1)).Replace('_', ' ').Trim();
-        return LocationId.TryCreate(suburb, state, out location, out _);
+        _logger.LogInformation("Deleted cached folder: {Folder}", folderName);
+        return true;
     }
 
     public void RecordUpdateProgressByFolder(
@@ -618,16 +926,20 @@ public class CacheService : ICacheService
         int? currentFrame = null,
         int? totalFrames = null)
     {
-        var folderName = Path.GetFileName(cacheFolderPath.TrimEnd(Path.DirectorySeparatorChar));
+        var fullPath = Path.GetFullPath(cacheFolderPath.TrimEnd(Path.DirectorySeparatorChar));
         string? locationKey = null;
 
-        if (LocationHelper.TryParseCacheFolderName(folderName, out var parsed))
+        if (_stagingLocationKeys.TryGetValue(fullPath, out var stagingKey))
         {
-            locationKey = parsed!.Location.Key;
+            locationKey = stagingKey;
         }
-        else if (TryParseStagingName(folderName, out var stagingLocation, out _))
+        else
         {
-            locationKey = stagingLocation!.Key;
+            var folderName = Path.GetFileName(fullPath);
+            if (LocationHelper.TryParseCacheFolderName(folderName, allowStaging: true, out var parsed))
+            {
+                locationKey = parsed!.Location.Key;
+            }
         }
 
         if (locationKey == null)

@@ -12,6 +12,8 @@ public class LegacyCompatibilityTests
     public async Task Pre_change_cache_fixture_remains_readable_without_a_completion_marker()
     {
         await using var app = new BomServiceFactory();
+        // The synthetic legacy fixture uses 1x1 RGBA PNGs with valid CRCs and
+        // zlib data. Validation must not be relaxed for invalid image fixtures.
         CopyFixture(app, "Pomona_QLD_20251207_000906");
         app.Capture.Behavior = CaptureBehavior.PauseThenSucceed;
         app.Capture.ResetSignals();

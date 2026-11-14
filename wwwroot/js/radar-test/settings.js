@@ -44,19 +44,13 @@ export function updateSettingsUI() {
 }
 
 /**
- * Apply settings (restart intervals if needed)
+ * Apply settings (restart playback; polling is restarted by the caller)
  */
 export function applySettings() {
     // Restart play interval if playing
     if (state.isPlaying) {
         pause();
         play();
-    }
-    
-    // Restart refresh interval (will be handled by refreshData caller)
-    if (state.refreshInterval) {
-        clearInterval(state.refreshInterval);
-        state.refreshInterval = null;
     }
 }
 

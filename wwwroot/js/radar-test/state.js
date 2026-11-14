@@ -12,10 +12,17 @@ export const state = {
     isPlaying: false,
     lastRefreshTime: null,
     refreshInterval: null,
+    refreshTimeout: null,
+    pollingEnabled: false,
+    isRefreshInFlight: false,
+    inFlightRefresh: null,
+    refreshQueued: false,
+    autoPlayAttempted: false,
     nextClientCheckTime: null,
     retryInterval: null,
     isApiDown: false,
     retryAttempts: 0,
+    updateStatusDetailOverride: null,
     cacheRangeInfo: null,
     historicalData: null,
     isExtendedMode: false,
@@ -33,10 +40,17 @@ export function resetState() {
     state.isPlaying = false;
     state.lastRefreshTime = null;
     state.refreshInterval = null;
+    state.refreshTimeout = null;
+    state.pollingEnabled = false;
+    state.isRefreshInFlight = false;
+    state.inFlightRefresh = null;
+    state.refreshQueued = false;
+    state.autoPlayAttempted = false;
     state.nextClientCheckTime = null;
     state.retryInterval = null;
     state.isApiDown = false;
     state.retryAttempts = 0;
+    state.updateStatusDetailOverride = null;
     state.cacheRangeInfo = null;
     state.historicalData = null;
     state.isExtendedMode = false;

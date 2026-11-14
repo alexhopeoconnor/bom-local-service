@@ -62,6 +62,28 @@ public class RadarScrapingWorkflow : IRadarScrapingWorkflow
     
     public async Task<RadarResponse> ExecuteAsync(ScrapingContext context, CancellationToken cancellationToken)
     {
+        try
+        {
+            return await ExecuteCoreAsync(context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (cancellationToken.IsCancellationRequested)
+        {
+            // A step may have swallowed the deadline and returned a generic failure.
+            // Normalize it at the workflow boundary so the capture can classify
+            // shutdown/timeout instead of reporting a scraping error.
+            throw new OperationCanceledException(
+                "Radar scraping workflow was cancelled",
+                ex,
+                cancellationToken);
+        }
+    }
+
+    private async Task<RadarResponse> ExecuteCoreAsync(ScrapingContext context, CancellationToken cancellationToken)
+    {
         var workflowConfig = _configuration.GetSection($"Scraping:Workflows:{Name}").Get<ScrapingWorkflowConfig>();
         var workflowStartTime = DateTime.UtcNow;
         var stepTimings = new List<(string stepName, double durationSeconds)>();
@@ -74,6 +96,7 @@ public class RadarScrapingWorkflow : IRadarScrapingWorkflow
         
         foreach (var stepName in StepNames)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var stepConfig = workflowConfig?.Steps?.GetValueOrDefault(stepName) ?? new ScrapingStepConfig { Enabled = true };
             
             if (!stepConfig.Enabled)
@@ -104,6 +127,10 @@ public class RadarScrapingWorkflow : IRadarScrapingWorkflow
             _logger.LogInformation("Executing step {Step}", stepName);
             
             var result = await step.ExecuteAsync(context, cancellationToken);
+
+            // A step may return a result after its wait was cancelled. Check the
+            // deadline before recording progress or treating a failure as final.
+            cancellationToken.ThrowIfCancellationRequested();
             
             var stepDuration = (DateTime.UtcNow - stepStartTime).TotalSeconds;
             stepTimings.Add((stepName, stepDuration));
@@ -141,12 +168,14 @@ public class RadarScrapingWorkflow : IRadarScrapingWorkflow
             
             if (!result.Success)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 throw new Exception($"Step {stepName} failed: {result.ErrorMessage}");
             }
             
             context.CompletedSteps.Add(stepName);
         }
         
+        cancellationToken.ThrowIfCancellationRequested();
         var totalDuration = (DateTime.UtcNow - workflowStartTime).TotalSeconds;
         
         // Check if workflow duration is significantly longer than average

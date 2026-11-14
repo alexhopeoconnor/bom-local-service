@@ -45,11 +45,25 @@ public sealed record RefreshQueueStatus(
 /// </summary>
 public interface ICacheRefreshQueue
 {
+    /// <summary>True only after persisted state restore and while admission is open.</summary>
     bool IsRunning { get; }
+
     int QueueDepth { get; }
     RefreshQueueStatus GetStatus(LocationId location);
     bool TryRequestRefresh(LocationId location, RefreshRequestSource source, out RefreshRequestResult result);
     bool TryBeginDelete(LocationId location, out string? error);
     void EndDelete(LocationId location);
     bool IsLocationActive(LocationId location);
+
+    /// <summary>
+    /// Returns a defensive copy of the worker's current runtime state for a
+    /// location, or null when the location has no live state.
+    /// </summary>
+    LocationRuntimeState? GetRuntimeStateSnapshot(LocationId location);
+
+    /// <summary>
+    /// Returns a copy of locations currently known to the live worker state.
+    /// Durable-store discovery remains a separate source.
+    /// </summary>
+    IReadOnlyList<LocationId> GetMonitoredLocations();
 }

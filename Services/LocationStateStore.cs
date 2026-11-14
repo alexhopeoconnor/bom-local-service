@@ -9,74 +9,198 @@ namespace BomLocalService.Services;
 
 /// <summary>
 /// Persists useful per-location operational state outside the capture-folder
-/// namespace. Cache cleanup never scans this directory.
+/// namespace. Cache cleanup never scans this directory. Every operation is
+/// anchored at the configured cache root so replacing .service or locations
+/// after construction fails closed.
 /// </summary>
 public sealed class LocationStateStore : ILocationStateStore
 {
+    private const int MaxStateBytes = 64 * 1024;
+    private const string LocationsDirectoryName = "locations";
+
     private readonly ILogger<LocationStateStore> _logger;
-    private readonly string _stateDirectory;
+    private readonly string _cacheRoot;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+    private string StateDirectoryRelative =>
+        $"{FilePathHelper.ServiceStateDirectoryName}/{LocationsDirectoryName}";
 
     public LocationStateStore(ILogger<LocationStateStore> logger, IConfiguration configuration)
     {
         _logger = logger;
-        _stateDirectory = Path.Combine(
-            FilePathHelper.GetServiceStateRoot(FilePathHelper.GetCacheDirectory(configuration)),
-            "locations");
-        Directory.CreateDirectory(_stateDirectory);
+
+        _cacheRoot = Path.GetFullPath(FilePathHelper.GetCacheDirectory(configuration));
+        Directory.CreateDirectory(_cacheRoot);
+
+        if (!FilePathHelper.TryEnsureDirectChildDirectory(
+                _cacheRoot,
+                FilePathHelper.ServiceStateDirectoryName,
+                out _,
+                out var serviceError))
+        {
+            throw new InvalidOperationException($"Service state directory is unsafe: {serviceError}");
+        }
+
+        if (!FilePathHelper.TryResolveOwnedPath(
+                _cacheRoot,
+                StateDirectoryRelative,
+                allowMissingLeaf: true,
+                out var locationsPath,
+                out var locationsError))
+        {
+            throw new InvalidOperationException($"Location state directory is unsafe: {locationsError}");
+        }
+
+        try
+        {
+            Directory.CreateDirectory(locationsPath!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            throw new InvalidOperationException($"Location state directory could not be created: {ex.Message}", ex);
+        }
+
+        if (!FilePathHelper.TryResolveOwnedPath(
+                _cacheRoot,
+                StateDirectoryRelative,
+                allowMissingLeaf: false,
+                out var validatedLocations,
+                out var validationError) ||
+            !Directory.Exists(validatedLocations))
+        {
+            throw new InvalidOperationException($"Location state directory is unsafe: {validationError}");
+        }
     }
 
     public async Task<LocationRuntimeState?> GetAsync(LocationId location, CancellationToken cancellationToken = default)
     {
-        var path = GetPath(location);
-        if (!File.Exists(path) || FilePathHelper.IsSymlinkOrReparsePoint(path))
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var relativePath = GetRelativePath(location);
+        if (!TryResolve(relativePath, allowMissingLeaf: true, out var path, out var pathError))
+        {
+            _logger.LogWarning("Refusing unsafe location state path for {Location}: {Error}", location, pathError);
+            return null;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!File.Exists(path))
         {
             return null;
         }
 
-        try
+        if (!CacheHelper.TryReadBoundedJson<LocationRuntimeState>(
+                path!,
+                MaxStateBytes,
+                out var state,
+                out var readError) ||
+            state is null)
         {
-            var json = await File.ReadAllTextAsync(path, cancellationToken);
-            return JsonSerializer.Deserialize<LocationRuntimeState>(json);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to read location state for {Location}", location);
+            _logger.LogWarning("Failed to read location state for {Location}: {Error}", location, readError);
             return null;
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!LocationId.TryCreate(state.Suburb, state.State, out var storedLocation, out _) ||
+            !storedLocation!.Equals(location))
+        {
+            _logger.LogWarning("Location state file does not match the requested location: {Path}", path);
+            return null;
+        }
+
+        return state;
     }
 
-    public async Task SaveAsync(LocationRuntimeState state, CancellationToken cancellationToken = default)
+    public async Task<bool> SaveAsync(LocationRuntimeState state, CancellationToken cancellationToken = default)
     {
-        if (!LocationId.TryCreate(state.Suburb, state.State, out var location, out _))
+        ArgumentNullException.ThrowIfNull(state);
+
+        if (!LocationId.TryCreate(state.Suburb, state.State, out var location, out var locationError))
         {
-            return;
+            _logger.LogWarning(
+                "Refusing to persist invalid location state for {Suburb}, {State}: {Error}",
+                state.Suburb,
+                state.State,
+                locationError);
+            return false;
         }
 
+        var snapshot = CopyState(state);
+        var relativePath = GetRelativePath(location!);
+        var tempRelativePath = relativePath + ".tmp";
+
         await _writeLock.WaitAsync(cancellationToken);
+        string? tempPath = null;
+        string? path = null;
+        string? pathError = null;
         try
         {
-            state.UpdatedAt = DateTime.UtcNow;
-            var path = GetPath(location!);
-            var tempPath = path + ".tmp";
-            var json = JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true });
-            await File.WriteAllTextAsync(tempPath, json, cancellationToken);
-            File.Move(tempPath, path, overwrite: true);
+            if (!TryResolve(relativePath, allowMissingLeaf: true, out path, out pathError) ||
+                !TryResolve(tempRelativePath, allowMissingLeaf: true, out tempPath, out pathError))
+            {
+                _logger.LogWarning(
+                    "Failed to persist location state for {Location}: {Error}",
+                    location,
+                    pathError);
+                return false;
+            }
+
+            var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });
+            var bytes = Encoding.UTF8.GetBytes(json);
+
+            await using (var stream = new FileStream(
+                             tempPath!,
+                             FileMode.Create,
+                             FileAccess.Write,
+                             FileShare.None,
+                             4096,
+                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await stream.WriteAsync(bytes, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+                stream.Flush(flushToDisk: true);
+            }
+
+            // Revalidate destination and temp from the cache root immediately
+            // before the commit. This narrows, but cannot eliminate, TOCTOU.
+            if (!TryResolve(relativePath, allowMissingLeaf: true, out path, out pathError) ||
+                !TryResolve(tempRelativePath, allowMissingLeaf: true, out tempPath, out pathError))
+            {
+                _logger.LogWarning(
+                    "Refusing location state commit for {Location}: {Error}",
+                    location,
+                    pathError);
+                return false;
+            }
+
+            File.Move(tempPath!, path!, overwrite: true);
+            return true;
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
         {
-            _logger.LogWarning(ex, "Failed to persist location state for {Suburb}, {State}", state.Suburb, state.State);
+            _logger.LogWarning(ex, "Failed to persist location state for {Location}", location);
+            return false;
         }
         finally
         {
+            try
+            {
+                if (TryResolve(tempRelativePath, allowMissingLeaf: true, out var safeTempPath, out _) &&
+                    File.Exists(safeTempPath) &&
+                    !FilePathHelper.IsSymlinkOrReparsePoint(safeTempPath))
+                {
+                    File.Delete(safeTempPath);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only; never follow a replaced ancestor.
+            }
+
             _writeLock.Release();
         }
     }
@@ -84,40 +208,97 @@ public sealed class LocationStateStore : ILocationStateStore
     public async Task<IReadOnlyList<LocationRuntimeState>> GetAllAsync(CancellationToken cancellationToken = default)
     {
         var result = new List<LocationRuntimeState>();
-        if (!Directory.Exists(_stateDirectory))
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Validate the directory from the cache root before enumerating anything.
+        if (!TryResolve(StateDirectoryRelative, allowMissingLeaf: false, out var stateDirectory, out var stateDirectoryError) ||
+            !Directory.Exists(stateDirectory))
         {
+            _logger.LogWarning(
+                "Refusing to enumerate an unsafe or missing location state directory: {Error}",
+                stateDirectoryError);
             return result;
         }
 
-        foreach (var file in Directory.EnumerateFiles(_stateDirectory, "*.json"))
+        string[] files;
+        try
+        {
+            files = Directory.GetFiles(stateDirectory!, "*.json");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Failed to enumerate location state directory");
+            return result;
+        }
+
+        foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            try
+
+            var fileName = Path.GetFileName(file);
+            var relativePath = $"{StateDirectoryRelative}/{fileName}";
+            if (!TryResolve(relativePath, allowMissingLeaf: false, out var path, out var pathError))
             {
-                var json = await File.ReadAllTextAsync(file, cancellationToken);
-                var state = JsonSerializer.Deserialize<LocationRuntimeState>(json);
-                if (state != null)
-                {
-                    result.Add(state);
-                }
+                _logger.LogWarning("Ignoring unsafe location state file {File}: {Error}", fileName, pathError);
+                continue;
             }
-            catch (OperationCanceledException)
+
+            if (!CacheHelper.TryReadBoundedJson<LocationRuntimeState>(
+                    path!,
+                    MaxStateBytes,
+                    out var state,
+                    out var readError) ||
+                state is null)
             {
-                throw;
+                _logger.LogWarning("Failed to read location state file {File}: {Error}", fileName, readError);
+                continue;
             }
-            catch (Exception ex)
+
+            if (!LocationId.TryCreate(state.Suburb, state.State, out var storedLocation, out _) ||
+                !string.Equals(
+                    Path.GetFileNameWithoutExtension(fileName),
+                    GetHash(storedLocation!),
+                    StringComparison.Ordinal))
             {
-                _logger.LogWarning(ex, "Failed to read location state file {File}", Path.GetFileName(file));
+                _logger.LogWarning("Ignoring location state file with invalid identity: {File}", fileName);
+                continue;
             }
+
+            result.Add(state);
         }
 
         return result;
     }
 
-    private string GetPath(LocationId location)
+    private string GetRelativePath(LocationId location) =>
+        $"{StateDirectoryRelative}/{GetHash(location)}.json";
+
+    private bool TryResolve(
+        string relativePath,
+        bool allowMissingLeaf,
+        out string? path,
+        out string? error) =>
+        FilePathHelper.TryResolveOwnedPath(_cacheRoot, relativePath, allowMissingLeaf, out path, out error);
+
+    private static string GetHash(LocationId location)
     {
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(location.Key)))
             .ToLowerInvariant()[..32];
-        return Path.Combine(_stateDirectory, hash + ".json");
+        return hash;
     }
+
+    private static LocationRuntimeState CopyState(LocationRuntimeState state) => new()
+    {
+        Suburb = state.Suburb,
+        State = state.State,
+        LastAttemptAt = state.LastAttemptAt,
+        LastSuccessfulCaptureAt = state.LastSuccessfulCaptureAt,
+        LatestObservationAt = state.LatestObservationAt,
+        NextRetryAt = state.NextRetryAt,
+        UpdateFailed = state.UpdateFailed,
+        ErrorCode = state.ErrorCode,
+        Error = state.Error,
+        ConsecutiveFailures = state.ConsecutiveFailures,
+        UpdatedAt = state.UpdatedAt
+    };
 }

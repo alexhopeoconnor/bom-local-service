@@ -22,7 +22,7 @@
   <!-- Keep the application project at the repository root from compiling or publishing tests,
        fixtures, verification artifacts, or the runtime cache. -->
   <ItemGroup>
-    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="tests/**/*.cs;artifacts/**;cache/**" />
     <Content Remove="tests/**;artifacts/**;cache/**" />
     <EmbeddedResource Remove="tests/**;artifacts/**;cache/**" />
     <None Remove="tests/**;artifacts/**;cache/**" />
@@ -30,6 +30,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Playwright" Version="1.57.0" />
+    <PackageReference Include="StbImageSharp" Version="2.30.16" />
   </ItemGroup>
 
 </Project>

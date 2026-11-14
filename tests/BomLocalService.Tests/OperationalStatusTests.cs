@@ -37,6 +37,78 @@ public class OperationalStatusTests
     }
 
     [Fact]
+    public async Task Readiness_rejects_replaced_cache_root_without_writing_outside()
+    {
+        await using var app = new BomServiceFactory();
+        using var client = app.CreateClient();
+
+        var cacheDirectory = app.CacheDirectory;
+        var backupDirectory = cacheDirectory + ".readiness-backup-" + Guid.NewGuid().ToString("N");
+        var outsideDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "bom-readiness-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outsideDirectory);
+        var sentinel = TestCache.CreateSentinel(outsideDirectory);
+
+        var moved = false;
+        var linked = false;
+
+        try
+        {
+            Directory.Move(cacheDirectory, backupDirectory);
+            moved = true;
+
+            try
+            {
+                Directory.CreateSymbolicLink(cacheDirectory, outsideDirectory);
+                linked = true;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            using var watcher = new FileSystemWatcher(outsideDirectory, ".readiness-*.tmp")
+            {
+                EnableRaisingEvents = true
+            };
+            var created = new TaskCompletionSource<string?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            watcher.Created += (_, args) => created.TrySetResult(args.FullPath);
+
+            using var ready = await client.GetAsync("/api/ready");
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
+
+            using var readyJson = JsonDocument.Parse(await ready.Content.ReadAsStringAsync());
+            Assert.Equal("not_ready", readyJson.RootElement.GetProperty("status").GetString());
+            Assert.False(readyJson.RootElement.GetProperty("checks").GetProperty("cacheWritable").GetBoolean());
+
+            await Task.WhenAny(created.Task, Task.Delay(TimeSpan.FromSeconds(1)));
+            Assert.False(created.Task.IsCompleted, "readiness wrote a probe through the replaced root");
+            Assert.True(File.Exists(sentinel));
+            Assert.Equal("untouched", File.ReadAllText(sentinel));
+            Assert.Empty(Directory.GetFiles(outsideDirectory, ".readiness-*.tmp"));
+        }
+        finally
+        {
+            if (linked && Directory.Exists(cacheDirectory))
+            {
+                Directory.Delete(cacheDirectory);
+            }
+
+            if (moved && Directory.Exists(backupDirectory) && !Directory.Exists(cacheDirectory))
+            {
+                Directory.Move(backupDirectory, cacheDirectory);
+            }
+
+            if (Directory.Exists(outsideDirectory))
+            {
+                Directory.Delete(outsideDirectory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Cold_start_reports_progress_then_fresh_status_after_capture()
     {
         await using var app = new BomServiceFactory();

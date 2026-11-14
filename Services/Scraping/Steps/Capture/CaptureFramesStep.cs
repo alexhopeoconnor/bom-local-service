@@ -1,4 +1,5 @@
 using BomLocalService.Models;
+using BomLocalService.Services.Browser;
 using BomLocalService.Services.Interfaces;
 using BomLocalService.Services.Scraping;
 using BomLocalService.Utilities;
@@ -8,6 +9,9 @@ namespace BomLocalService.Services.Scraping.Steps.Capture;
 
 public class CaptureFramesStep : BaseScrapingStep
 {
+    private const int ScreenshotTimeoutMs = 30_000;
+    private static readonly TimeSpan ErrorDebugSaveTimeout = TimeSpan.FromSeconds(5);
+
     private readonly ICacheService _cacheService;
     private readonly IScrubDisplayTimestampParser _scrubDisplayTime;
     private readonly int _tileRenderWaitMs;
@@ -84,21 +88,24 @@ public class CaptureFramesStep : BaseScrapingStep
             
             for (int frameIndex = 0; frameIndex < frameCount; frameIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 Logger.LogInformation("Step {Step}: Capturing frame {FrameIndex} of {FrameCount}", Name, frameIndex, frameCount);
                 
-                await context.Page.WaitForTimeoutAsync(_tileRenderWaitMs);
+                await Task.Delay(_tileRenderWaitMs, cancellationToken);
                 
                 // Small wait to ensure display label is stable after frame change/selection
                 // This is especially important for frame 0 which was just selected in ResetToFirstFrame
-                await context.Page.WaitForTimeoutAsync(300);
+                await Task.Delay(300, cancellationToken);
                 
                 // Try extracting timestamp with a retry in case the label is still updating
                 var frameTimestamp = await _scrubDisplayTime.ReadUtcAsync(context.Page, SelectorService, context, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (frameTimestamp == null)
                 {
                     // Retry once after a short wait in case label was updating
-                    await context.Page.WaitForTimeoutAsync(200);
+                    await Task.Delay(200, cancellationToken);
                     frameTimestamp = await _scrubDisplayTime.ReadUtcAsync(context.Page, SelectorService, context, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
                 
                 // Fallback: calculate expected timestamp from observation time and frame index if we can't parse it
@@ -116,7 +123,9 @@ public class CaptureFramesStep : BaseScrapingStep
                         Name, frameIndex, frameTimestamp);
                     await _scrubDisplayTime.WaitForDisplayLabelChangeAsync(
                         context.Page, SelectorService, previousTimestamp.Value, context, cancellationToken: cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                     frameTimestamp = await _scrubDisplayTime.ReadUtcAsync(context.Page, SelectorService, context, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (frameTimestamp == null || frameTimestamp == previousTimestamp.Value)
                     {
                         if (context.LastUpdatedInfo?.ObservationTime != null && context.FrameInfo != null && frameIndex < context.FrameInfo.Count)
@@ -142,7 +151,7 @@ public class CaptureFramesStep : BaseScrapingStep
                 }
                 
                 var framePath = FilePathHelper.GetFrameFilePath(context.CacheFolderPath, CachedDataType.Radar, frameIndex);
-                await CaptureMapScreenshotAsync(context.Page, context.MapContainer!, framePath, context.MapBoundingBox!);
+                await CaptureMapScreenshotAsync(context.Page, context.MapContainer!, framePath, context.MapBoundingBox!, cancellationToken);
                 
                 frames.Add(new RadarFrame
                 {
@@ -162,20 +171,27 @@ public class CaptureFramesStep : BaseScrapingStep
                 
                 if (frameIndex < frameCount - 1)
                 {
-                    await DismissModalOverlaysAsync(context.Page);
+                    await DismissModalOverlaysAsync(context.Page, cancellationToken);
                     
                     var currentTimestamp = await _scrubDisplayTime.ReadUtcAsync(context.Page, SelectorService, context, cancellationToken);
-                    
-                    await stepForwardButton.ClickAsync(new LocatorClickOptions { Force = true });
-                    
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    await stepForwardButton.ClickAsync(new LocatorClickOptions
+                    {
+                        Force = true,
+                        Timeout = Selectors.StepForwardButton.TimeoutMs
+                    });
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     if (currentTimestamp.HasValue)
                     {
                         await _scrubDisplayTime.WaitForDisplayLabelChangeAsync(
                             context.Page, SelectorService, currentTimestamp.Value, context, cancellationToken: cancellationToken);
+                        cancellationToken.ThrowIfCancellationRequested();
                     }
                     else
                     {
-                        await context.Page.WaitForTimeoutAsync(500);
+                        await Task.Delay(500, cancellationToken);
                     }
                 }
             }
@@ -194,18 +210,37 @@ public class CaptureFramesStep : BaseScrapingStep
             
             return ScrapingStepResult.Successful();
         }
+        catch (OperationCanceledException)
+        {
+            Logger.LogInformation("Step {Step} cancelled", Name);
+            throw;
+        }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Step {Step} failed", Name);
-            await SaveErrorDebugAsync(context, $"Failed to capture frames: {ex.Message}", cancellationToken);
+            try
+            {
+                await BoundedBrowserOperation.RunAsync(
+                    SaveErrorDebugAsync(context, $"Failed to capture frames: {ex.Message}", cancellationToken),
+                    ErrorDebugSaveTimeout,
+                    CancellationToken.None,
+                    (message, debugEx) => Logger.LogDebug(debugEx, "Step {Step}: {Message}", Name, message),
+                    "save-error-debug").ConfigureAwait(false);
+            }
+            catch (Exception debugEx)
+            {
+                Logger.LogDebug(debugEx, "Step {Step}: failed to save error debug artefacts", Name);
+            }
+
             return ScrapingStepResult.Failed($"Failed to capture frames: {ex.Message}");
         }
     }
     
-    private async Task DismissModalOverlaysAsync(IPage page)
+    private async Task DismissModalOverlaysAsync(IPage page, CancellationToken cancellationToken)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var hasModal = await page.EvaluateAsync<bool>(JavaScriptTemplates.CheckModalOverlay);
             
             if (!hasModal)
@@ -216,7 +251,7 @@ public class CaptureFramesStep : BaseScrapingStep
             Logger.LogDebug("Modal overlay detected, dismissing");
             
             await page.Keyboard.PressAsync("Escape");
-            await page.WaitForTimeoutAsync(200);
+            await Task.Delay(200, cancellationToken);
             
             var stillVisible = await page.EvaluateAsync<bool>(JavaScriptTemplates.CheckModalStillVisible);
             
@@ -225,8 +260,16 @@ public class CaptureFramesStep : BaseScrapingStep
                 try
                 {
                     var mapContainer = SelectorService.GetLocator(page, Selectors.MapContainer);
-                    await mapContainer.ClickAsync(new LocatorClickOptions { Force = true });
-                    await page.WaitForTimeoutAsync(100);
+                    await mapContainer.ClickAsync(new LocatorClickOptions
+                    {
+                        Force = true,
+                        Timeout = Selectors.MapContainer.TimeoutMs
+                    });
+                    await Task.Delay(100, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
                 }
                 catch
                 {
@@ -234,13 +277,22 @@ public class CaptureFramesStep : BaseScrapingStep
                 }
             }
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             Logger.LogDebug(ex, "Error dismissing modal overlay, continuing");
         }
     }
     
-    private async Task CaptureMapScreenshotAsync(IPage page, ILocator mapContainer, string outputPath, Clip containerClip)
+    private async Task CaptureMapScreenshotAsync(
+        IPage page,
+        ILocator mapContainer,
+        string outputPath,
+        Clip containerClip,
+        CancellationToken cancellationToken)
     {
         if (containerClip == null || containerClip.Width <= 0 || containerClip.Height <= 0)
         {
@@ -282,6 +334,10 @@ public class CaptureFramesStep : BaseScrapingStep
                         }
                     }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -329,23 +385,30 @@ public class CaptureFramesStep : BaseScrapingStep
             throw new Exception($"Cannot create valid crop area. Container: {containerClip.Width}x{containerClip.Height}, Viewport: {viewportWidth ?? 0}x{viewportHeight ?? 0}");
         }
         
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             await page.WaitForLoadStateAsync(LoadState.NetworkIdle, new PageWaitForLoadStateOptions { Timeout = 5000 });
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {
             // Continue if network idle timeout
         }
         
-        await DismissModalOverlaysAsync(page);
+        await DismissModalOverlaysAsync(page, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         
         await page.ScreenshotAsync(new PageScreenshotOptions
         {
             Path = outputPath,
             Clip = cropArea,
             Type = ScreenshotType.Png,
-            Animations = ScreenshotAnimations.Disabled
+            Animations = ScreenshotAnimations.Disabled,
+            Timeout = ScreenshotTimeoutMs
         });
         
         Logger.LogDebug("Screenshot saved: {Path} (crop: {X},{Y} {Width}x{Height})", 

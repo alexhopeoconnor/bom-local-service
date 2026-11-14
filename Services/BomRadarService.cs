@@ -131,7 +131,8 @@ public sealed class BomRadarService : IBomRadarService
     public async Task<CacheUpdateStatus> GetCacheStatusAsync(LocationId location, CancellationToken cancellationToken = default)
     {
         var snapshot = await _cacheService.GetLatestSnapshotAsync(location, CachedDataType.Radar, cancellationToken);
-        var state = await _stateStore.GetAsync(location, cancellationToken);
+        var state = _refreshQueue.GetRuntimeStateSnapshot(location)
+            ?? await _stateStore.GetAsync(location, cancellationToken);
         var queueStatus = _refreshQueue.GetStatus(location);
 
         var status = new CacheUpdateStatus

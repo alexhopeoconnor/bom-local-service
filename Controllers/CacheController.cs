@@ -12,17 +12,23 @@ public class CacheController : ControllerBase
     private readonly ICacheService _cacheService;
     private readonly IBomRadarService _bomRadarService;
     private readonly ICacheRefreshQueue _refreshQueue;
+    private readonly ILocationStateStore _stateStore;
+    private readonly IClock _clock;
     private readonly ILogger<CacheController> _logger;
 
     public CacheController(
         ICacheService cacheService,
         IBomRadarService bomRadarService,
         ICacheRefreshQueue refreshQueue,
+        ILocationStateStore stateStore,
+        IClock clock,
         ILogger<CacheController> logger)
     {
         _cacheService = cacheService;
         _bomRadarService = bomRadarService;
         _refreshQueue = refreshQueue;
+        _stateStore = stateStore;
+        _clock = clock;
         _logger = logger;
     }
 
@@ -166,10 +172,46 @@ public class CacheController : ControllerBase
 
         try
         {
+            // Deletion clears snapshots but deliberately keeps the location
+            // monitored. Persist the live (preferred), durable, or newly
+            // registered runtime state before touching any snapshot.
+            var runtimeState = _refreshQueue.GetRuntimeStateSnapshot(location!);
+            if (runtimeState is null)
+            {
+                var durable = await _stateStore.GetAsync(location!, cancellationToken);
+                if (durable is not null &&
+                    LocationId.TryCreate(durable.Suburb, durable.State, out var durableLocation, out _) &&
+                    durableLocation!.Equals(location!))
+                {
+                    runtimeState = durable;
+                }
+            }
+
+            runtimeState ??= new LocationRuntimeState
+            {
+                Suburb = location!.Suburb,
+                State = location.State,
+                UpdatedAt = _clock.UtcNow
+            };
+
+            if (!await _stateStore.SaveAsync(runtimeState, cancellationToken))
+            {
+                var storageError = ApiErrorResponseBuilder.InternalError(
+                    "Runtime state could not be persisted; cached data was not deleted. Retry the request.");
+                storageError.ErrorCode = "STORAGE_ERROR";
+                storageError.ErrorType = "StorageError";
+                storageError.Details = new Dictionary<string, object>
+                {
+                    { "location", new { suburb = location!.Suburb, state = location.State } },
+                    { "snapshotsDeleted", false }
+                };
+                return StatusCode(StatusCodes.Status500InternalServerError, storageError);
+            }
+
             var deleted = await _cacheService.DeleteCachedLocationAsync(location!, cancellationToken);
             if (deleted)
             {
-                return Ok(new { message = $"Cache deleted for {location!.Suburb}, {location.State}" });
+                return Ok(new { message = $"Cache deleted for {location!.Suburb}, {location.State}. Monitoring continues." });
             }
 
             var errorResponse = ApiErrorResponseBuilder.NotFound(

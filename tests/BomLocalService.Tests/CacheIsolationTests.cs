@@ -1,8 +1,11 @@
 using System.Net;
 using System.Text.Json;
+using BomLocalService.Models;
 using BomLocalService.Services;
+using BomLocalService.Services.Interfaces;
 using BomLocalService.Utilities;
 using BomLocalService.Tests.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace BomLocalService.Tests;
@@ -114,6 +117,209 @@ public class CacheIsolationTests
 
             Directory.Delete(outsideDirectory, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task Nested_radar_symlink_is_not_served_and_delete_does_not_follow_it()
+    {
+        await using var app = new BomServiceFactory();
+        var now = app.Clock.UtcNow;
+        var folder = TestCache.SeedSnapshot(
+            app.CacheDirectory,
+            "Pomona",
+            "QLD",
+            now.AddMinutes(-10),
+            now.AddMinutes(-5),
+            Enumerable.Range(0, 7).Select(index => now.AddMinutes(-40 + index * 5)).ToArray());
+
+        var outsideDirectory = Path.Combine(Path.GetTempPath(), "bom-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outsideDirectory);
+        var sentinel = TestCache.CreateSentinel(outsideDirectory);
+        var radarPath = Path.Combine(folder, "radar");
+
+        try
+        {
+            try
+            {
+                Directory.Delete(radarPath, recursive: true);
+                Directory.CreateSymbolicLink(radarPath, outsideDirectory);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            using var client = app.CreateClient();
+            using var range = await client.GetAsync("/api/cache/Pomona/QLD/range");
+            Assert.Equal(HttpStatusCode.NotFound, range.StatusCode);
+
+            using var delete = await client.DeleteAsync("/api/cache/Pomona/QLD");
+            Assert.Equal(HttpStatusCode.NotFound, delete.StatusCode);
+
+            Assert.True(File.Exists(sentinel));
+            Assert.True(Directory.Exists(outsideDirectory));
+        }
+        finally
+        {
+            if (Directory.Exists(radarPath))
+            {
+                Directory.Delete(radarPath);
+            }
+
+            Directory.Delete(outsideDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Debug_root_symlink_does_not_let_cleanup_delete_outside_data()
+    {
+        await using var app = new BomServiceFactory();
+        var outsideDirectory = Path.Combine(Path.GetTempPath(), "bom-outside-" + Guid.NewGuid().ToString("N"));
+        var oldDebug = Path.Combine(outsideDirectory, "old");
+        Directory.CreateDirectory(oldDebug);
+        var sentinel = TestCache.CreateSentinel(oldDebug);
+        Directory.SetLastWriteTimeUtc(oldDebug, app.Clock.UtcNow.AddDays(-2));
+        var debugLink = Path.Combine(app.CacheDirectory, "debug");
+
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(debugLink, outsideDirectory);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            using var client = app.CreateClient();
+            var cleanup = app.CreateCleanupService();
+            await cleanup.RunCleanupAsync();
+
+            Assert.True(File.Exists(sentinel));
+            Assert.True(Directory.Exists(oldDebug));
+        }
+        finally
+        {
+            if (Directory.Exists(debugLink))
+            {
+                Directory.Delete(debugLink);
+            }
+
+            Directory.Delete(outsideDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Replaced_cache_root_is_not_enumerated_by_inventory_or_cleanup()
+    {
+        await using var app = new BomServiceFactory();
+        using var client = app.CreateClient();
+        var cache = app.Services.GetRequiredService<ICacheService>();
+        var root = app.CacheDirectory;
+        var backup = root + "-backup";
+        var outside = Path.Combine(Path.GetTempPath(), "bom-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outside);
+        var sentinel = TestCache.CreateSentinel(outside);
+        Directory.Move(root, backup);
+
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(root, outside);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            Assert.Empty(cache.GetCacheInventory());
+            var cleanup = app.CreateCleanupService();
+            await cleanup.RunCleanupAsync();
+            Assert.True(File.Exists(sentinel));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root);
+            }
+
+            if (Directory.Exists(backup))
+            {
+                Directory.Move(backup, root);
+            }
+
+            if (Directory.Exists(outside))
+            {
+                Directory.Delete(outside, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Leading_dot_location_uses_v2_and_is_not_hidden_as_reserved()
+    {
+        await using var app = new BomServiceFactory();
+        var now = app.Clock.UtcNow;
+        var folder = TestCache.SeedSnapshot(
+            app.CacheDirectory,
+            ".Foo",
+            "QLD",
+            now.AddMinutes(-10),
+            now.AddMinutes(-5),
+            Enumerable.Range(0, 7).Select(index => now.AddMinutes(-40 + index * 5)).ToArray());
+
+        Assert.False(Path.GetFileName(folder).StartsWith(".", StringComparison.Ordinal));
+        Assert.StartsWith("v2~", Path.GetFileName(folder));
+
+        using var client = app.CreateClient();
+        var cache = app.Services.GetRequiredService<ICacheService>();
+        Assert.Contains(cache.GetCacheInventory(), entry =>
+            entry.FolderName == Path.GetFileName(folder) &&
+            entry.Location.Key == LocationId.Create(".Foo", "QLD").Key);
+    }
+
+    [Fact]
+    public async Task Space_and_literal_underscore_locations_have_distinct_exact_ownership()
+    {
+        await using var app = new BomServiceFactory();
+        var now = app.Clock.UtcNow;
+        var observations = Enumerable.Range(0, 7).Select(index => now.AddMinutes(-40 + index * 5)).ToArray();
+
+        var space = TestCache.SeedSnapshot(
+            app.CacheDirectory,
+            "Wagga Wagga",
+            "NSW",
+            now.AddMinutes(-10),
+            now.AddMinutes(-5),
+            observations);
+        var underscore = TestCache.SeedSnapshot(
+            app.CacheDirectory,
+            "Wagga_Wagga",
+            "NSW",
+            now.AddMinutes(-11),
+            now.AddMinutes(-6),
+            observations);
+
+        Assert.NotEqual(Path.GetFileName(space), Path.GetFileName(underscore));
+
+        using var client = app.CreateClient();
+        var cache = app.Services.GetRequiredService<ICacheService>();
+        var entries = cache.GetCacheInventory();
+
+        Assert.Contains(entries, entry =>
+            entry.FolderName == Path.GetFileName(space) &&
+            entry.Location.Key == LocationId.Create("Wagga Wagga", "NSW").Key);
+        Assert.Contains(entries, entry =>
+            entry.FolderName == Path.GetFileName(underscore) &&
+            entry.Location.Key == LocationId.Create("Wagga_Wagga", "NSW").Key);
+
+        using var delete = await client.DeleteAsync("/api/cache/Wagga_Wagga/NSW");
+        Assert.Equal(HttpStatusCode.OK, delete.StatusCode);
+        Assert.False(Directory.Exists(underscore));
+        Assert.True(Directory.Exists(space));
     }
 
     [Fact]

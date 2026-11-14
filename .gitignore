@@ -51,6 +51,8 @@ tests/**/TestResults/
 verification-output/
 
 ## Test results
+__pycache__/
+*.py[cod]
 [Tt]est[Rr]esult*/
 [Bb]uild[Ll]og.*
 *.trx

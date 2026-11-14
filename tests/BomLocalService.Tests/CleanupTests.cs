@@ -1,4 +1,7 @@
+using System.Net;
+using BomLocalService.Services.Interfaces;
 using BomLocalService.Tests.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace BomLocalService.Tests;
@@ -22,6 +25,32 @@ public class CleanupTests
         Assert.True(Directory.Exists(unknown));
         Assert.True(File.Exists(sentinel));
         Assert.False(Directory.Exists(incomplete));
+    }
+
+    [Fact]
+    public async Task Null_frame_elements_do_not_crash_inventory_or_startup_cleanup()
+    {
+        await using var app = new BomServiceFactory();
+        var now = app.Clock.UtcNow;
+        var folder = TestCache.SeedSnapshot(
+            app.CacheDirectory,
+            "Pomona",
+            "QLD",
+            now.AddMinutes(-10),
+            now.AddMinutes(-5),
+            Enumerable.Range(0, 7).Select(index => now.AddMinutes(-40 + index * 5)).ToArray());
+
+        File.WriteAllText(
+            Path.Combine(folder, "radar", "frames.json"),
+            "[" + string.Join(",", Enumerable.Repeat("null", 7)) + "]");
+
+        using var client = app.CreateClient();
+        var cache = app.Services.GetRequiredService<ICacheService>();
+        var entries = cache.GetCacheInventory();
+        Assert.DoesNotContain(entries, entry => entry.FolderName == Path.GetFileName(folder));
+
+        using var range = await client.GetAsync("/api/cache/Pomona/QLD/range");
+        Assert.NotEqual(HttpStatusCode.InternalServerError, range.StatusCode);
     }
 
     [Fact]

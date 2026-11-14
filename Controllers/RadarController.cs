@@ -247,12 +247,12 @@ public class RadarController : ControllerBase
 
         if (!TryParseBound(startTime, "startTime", out var start, out var boundError))
         {
-            return BadRequest(boundError);
+            return boundError!;
         }
 
         if (!TryParseBound(endTime, "endTime", out var end, out boundError))
         {
-            return BadRequest(boundError);
+            return boundError!;
         }
 
         if (start.HasValue && end.HasValue && start.Value > end.Value)

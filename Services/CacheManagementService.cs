@@ -11,6 +11,7 @@ public class CacheManagementService : BackgroundService, IHostedServiceRegistrat
     private readonly IBomRadarService _bomRadarService;
     private readonly ICacheService _cacheService;
     private readonly ILocationStateStore _stateStore;
+    private readonly ICacheRefreshQueue _refreshQueue;
     private readonly IBrowserService _browserService;
     private readonly TimeSpan _checkInterval;
     private readonly TimeSpan _locationStaggerInterval;
@@ -21,6 +22,7 @@ public class CacheManagementService : BackgroundService, IHostedServiceRegistrat
         IBomRadarService bomRadarService,
         ICacheService cacheService,
         ILocationStateStore stateStore,
+        ICacheRefreshQueue refreshQueue,
         IBrowserService browserService,
         IConfiguration configuration)
     {
@@ -28,6 +30,7 @@ public class CacheManagementService : BackgroundService, IHostedServiceRegistrat
         _bomRadarService = bomRadarService;
         _cacheService = cacheService;
         _stateStore = stateStore;
+        _refreshQueue = refreshQueue;
         _browserService = browserService;
 
         var checkIntervalMinutes = configuration.GetValue<int?>("CacheManagement:CheckIntervalMinutes")
@@ -155,13 +158,20 @@ public class CacheManagementService : BackgroundService, IHostedServiceRegistrat
         }
 
         // Failed first-time locations have no complete cache folder yet, so
-        // their persisted retry state is the only discovery source.
+        // their persisted retry state is a discovery source.
         foreach (var state in await _stateStore.GetAllAsync(cancellationToken))
         {
             if (LocationId.TryCreate(state.Suburb, state.State, out var location, out _))
             {
                 locations[location!.Key] = location;
             }
+        }
+
+        // A failed first-time state write must not abandon monitoring during
+        // this process. Across a restart, durability is genuinely unavailable.
+        foreach (var location in _refreshQueue.GetMonitoredLocations())
+        {
+            locations[location.Key] = location;
         }
 
         return locations.Values

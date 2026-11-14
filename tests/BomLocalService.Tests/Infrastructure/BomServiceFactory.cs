@@ -14,12 +14,15 @@ public sealed class BomServiceFactory : WebApplicationFactory<Program>
 {
     private readonly Dictionary<string, string?> _settings;
 
-    public BomServiceFactory(Action<Dictionary<string, string?>>? configure = null)
+    public BomServiceFactory(
+        Action<Dictionary<string, string?>>? configure = null,
+        ControllableLocationStateStore? stateStore = null)
     {
         CacheDirectory = Path.Combine(Path.GetTempPath(), "bom-local-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(CacheDirectory);
         Clock = new TestClock(DateTime.UtcNow);
         Capture = new ControllableRadarCaptureService(Clock);
+        StateStore = stateStore;
 
         _settings = new Dictionary<string, string?>(StringComparer.Ordinal)
         {
@@ -47,6 +50,7 @@ public sealed class BomServiceFactory : WebApplicationFactory<Program>
     public string CacheDirectory { get; }
     public TestClock Clock { get; }
     public ControllableRadarCaptureService Capture { get; }
+    public ControllableLocationStateStore? StateStore { get; }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -63,6 +67,15 @@ public sealed class BomServiceFactory : WebApplicationFactory<Program>
 
             services.RemoveAll<IRadarCaptureService>();
             services.AddSingleton<IRadarCaptureService>(Capture);
+
+            // Optional explicit injection for lifecycle tests. The default remains
+            // the real LocationStateStore so cache persistence tests keep their
+            // normal on-disk behavior.
+            if (StateStore is not null)
+            {
+                services.RemoveAll<ILocationStateStore>();
+                services.AddSingleton<ILocationStateStore>(StateStore);
+            }
 
             // Deterministic tests own retention and periodic management directly.
             var hostedToRemove = services

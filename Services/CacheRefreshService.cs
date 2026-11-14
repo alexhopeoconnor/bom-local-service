@@ -12,6 +12,15 @@ namespace BomLocalService.Services;
 /// </summary>
 public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
 {
+    private enum WorkerPhase
+    {
+        Created,
+        Restoring,
+        Accepting,
+        Stopping,
+        Stopped
+    }
+
     private sealed class Reservation
     {
         public required LocationId Location { get; init; }
@@ -36,8 +45,7 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
     private readonly ConcurrentDictionary<string, byte> _deletions = new();
     private readonly ConcurrentDictionary<string, LocationRuntimeState> _states = new();
     private readonly ConcurrentDictionary<Task, byte> _inFlight = new();
-    private volatile bool _running;
-    private volatile bool _stopping;
+    private int _phase = (int)WorkerPhase.Created;
     private int _queueDepth;
     private int _activeCaptures;
 
@@ -89,38 +97,95 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
         });
     }
 
-    public bool IsRunning => _running && !_stopping;
+    private WorkerPhase Phase => (WorkerPhase)Volatile.Read(ref _phase);
 
-    public int QueueDepth => Math.Max(0, Volatile.Read(ref _queueDepth));
+    public bool IsRunning => Phase == WorkerPhase.Accepting;
+
+    public int QueueDepth
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return Math.Max(0, _queueDepth);
+            }
+        }
+    }
 
     public RefreshQueueStatus GetStatus(LocationId location)
     {
-        var active = _reservations.ContainsKey(location.Key);
-        var deleting = _deletions.ContainsKey(location.Key);
-        return new RefreshQueueStatus(active, IsRunning, deleting, QueueDepth, Volatile.Read(ref _activeCaptures));
+        lock (_gate)
+        {
+            var active = _reservations.ContainsKey(location.Key);
+            var deleting = _deletions.ContainsKey(location.Key);
+            return new RefreshQueueStatus(
+                active,
+                Phase == WorkerPhase.Accepting,
+                deleting,
+                Math.Max(0, _queueDepth),
+                Volatile.Read(ref _activeCaptures));
+        }
     }
 
-    public bool IsLocationActive(LocationId location) =>
-        _reservations.ContainsKey(location.Key) || _deletions.ContainsKey(location.Key);
+    public bool IsLocationActive(LocationId location)
+    {
+        lock (_gate)
+        {
+            return _reservations.ContainsKey(location.Key) || _deletions.ContainsKey(location.Key);
+        }
+    }
+
+    public LocationRuntimeState? GetRuntimeStateSnapshot(LocationId location)
+    {
+        if (!_states.TryGetValue(location.Key, out var state))
+        {
+            return null;
+        }
+
+        lock (state)
+        {
+            return CopyState(state);
+        }
+    }
+
+    public IReadOnlyList<LocationId> GetMonitoredLocations()
+    {
+        var locations = new List<LocationId>();
+
+        foreach (var state in _states.Values)
+        {
+            if (LocationId.TryCreate(state.Suburb, state.State, out var location, out _))
+            {
+                locations.Add(location!);
+            }
+        }
+
+        return Array.AsReadOnly(locations
+            .OrderBy(location => location.Key, StringComparer.Ordinal)
+            .ToArray());
+    }
 
     public bool TryRequestRefresh(
         LocationId location,
         RefreshRequestSource source,
         out RefreshRequestResult result)
     {
-        if (!IsRunning)
-        {
-            result = new RefreshRequestResult(
-                RefreshRequestResultCode.RejectedShuttingDown,
-                false,
-                "Refresh worker is not accepting work",
-                null,
-                QueueDepth);
-            return false;
-        }
+        var accepted = false;
+        var queueFull = false;
 
         lock (_gate)
         {
+            if (Phase != WorkerPhase.Accepting)
+            {
+                result = new RefreshRequestResult(
+                    RefreshRequestResultCode.RejectedShuttingDown,
+                    false,
+                    "Refresh worker is not accepting work",
+                    null,
+                    Math.Max(0, _queueDepth));
+                return false;
+            }
+
             if (_deletions.ContainsKey(location.Key))
             {
                 result = new RefreshRequestResult(
@@ -128,7 +193,7 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
                     false,
                     "Cache deletion is in progress for this location",
                     null,
-                    QueueDepth);
+                    Math.Max(0, _queueDepth));
                 return false;
             }
 
@@ -141,21 +206,30 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
                         ? "Cache update is currently running"
                         : "Cache update is already queued",
                     null,
-                    QueueDepth);
+                    Math.Max(0, _queueDepth));
                 return true;
             }
 
-            if (_states.TryGetValue(location.Key, out var state) &&
-                state.NextRetryAt.HasValue &&
-                state.NextRetryAt.Value > _clock.UtcNow)
+            if (_states.TryGetValue(location.Key, out var state))
             {
-                result = new RefreshRequestResult(
-                    RefreshRequestResultCode.RejectedBackoff,
-                    false,
-                    "Previous update failed; retry backoff is still active",
-                    state.NextRetryAt,
-                    QueueDepth);
-                return false;
+                // _gate -> state is the only nesting order; state-only readers
+                // and UpdateStateAsync never acquire _gate while holding state.
+                DateTime? nextRetryAt;
+                lock (state)
+                {
+                    nextRetryAt = state.NextRetryAt;
+                }
+
+                if (nextRetryAt.HasValue && nextRetryAt.Value > _clock.UtcNow)
+                {
+                    result = new RefreshRequestResult(
+                        RefreshRequestResultCode.RejectedBackoff,
+                        false,
+                        "Previous update failed; retry backoff is still active",
+                        nextRetryAt,
+                        Math.Max(0, _queueDepth));
+                    return false;
+                }
             }
 
             var reservation = new Reservation
@@ -164,36 +238,45 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
                 RequestedAtUtc = _clock.UtcNow
             };
             _reservations[location.Key] = reservation;
+
+            var request = new RefreshRequest(location, source, _clock.UtcNow);
+            _queueDepth++;
+
+            if (_queue.Writer.TryWrite(request))
+            {
+                accepted = true;
+                result = new RefreshRequestResult(
+                    RefreshRequestResultCode.Accepted,
+                    true,
+                    "Cache update accepted",
+                    null,
+                    _queueDepth);
+            }
+            else
+            {
+                _queueDepth--;
+                _reservations.TryRemove(location.Key, out _);
+                queueFull = true;
+                result = new RefreshRequestResult(
+                    RefreshRequestResultCode.RejectedQueueFull,
+                    false,
+                    "Refresh queue is full",
+                    null,
+                    Math.Max(0, _queueDepth));
+            }
         }
 
-        var request = new RefreshRequest(location, source, _clock.UtcNow);
-        if (_queue.Writer.TryWrite(request))
+        if (accepted)
         {
-            Interlocked.Increment(ref _queueDepth);
-            result = new RefreshRequestResult(
-                RefreshRequestResultCode.Accepted,
-                true,
-                "Cache update accepted",
-                null,
-                QueueDepth);
             _logger.LogInformation("Queued refresh for {Location} from {Source} (queue depth {Depth})",
-                location, source, QueueDepth);
-            return true;
+                location, source, result.QueueDepth);
         }
-
-        lock (_gate)
+        else if (queueFull)
         {
-            _reservations.TryRemove(location.Key, out _);
+            _logger.LogWarning("Rejected refresh for {Location}: queue is full", location);
         }
 
-        result = new RefreshRequestResult(
-            RefreshRequestResultCode.RejectedQueueFull,
-            false,
-            "Refresh queue is full",
-            null,
-            QueueDepth);
-        _logger.LogWarning("Rejected refresh for {Location}: queue is full", location);
-        return false;
+        return accepted;
     }
 
     public bool TryBeginDelete(LocationId location, out string? error)
@@ -219,20 +302,78 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
 
     public void EndDelete(LocationId location)
     {
-        _deletions.TryRemove(location.Key, out _);
+        lock (_gate)
+        {
+            _deletions.TryRemove(location.Key, out _);
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            if (Phase is WorkerPhase.Created or WorkerPhase.Restoring or WorkerPhase.Accepting)
+            {
+                Volatile.Write(ref _phase, (int)WorkerPhase.Stopping);
+            }
+
+            _queue.Writer.TryComplete();
+        }
+
+        await base.StopAsync(cancellationToken);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _running = true;
-        _logger.LogInformation(
-            "Refresh worker started (capacity {Capacity}, concurrency {Concurrency}, timeout {Timeout}s)",
-            _queueCapacity, _maxConcurrentCaptures, _captureTimeout.TotalSeconds);
+        lock (_gate)
+        {
+            if (Phase == WorkerPhase.Created)
+            {
+                Volatile.Write(ref _phase, (int)WorkerPhase.Restoring);
+            }
+        }
 
-        await LoadPersistedStatesAsync(stoppingToken);
+        if (Phase != WorkerPhase.Restoring)
+        {
+            lock (_gate)
+            {
+                Volatile.Write(ref _phase, (int)WorkerPhase.Stopped);
+            }
+
+            return;
+        }
+
+        _logger.LogInformation(
+            "Refresh worker restoring persisted state (capacity {Capacity}, concurrency {Concurrency}, timeout {Timeout}s)",
+            _queueCapacity, _maxConcurrentCaptures, _captureTimeout.TotalSeconds);
 
         try
         {
+            try
+            {
+                await LoadPersistedStatesAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Refresh worker could not restore persisted state; admission remains closed");
+                return;
+            }
+
+            lock (_gate)
+            {
+                if (Phase != WorkerPhase.Restoring || stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                Volatile.Write(ref _phase, (int)WorkerPhase.Accepting);
+            }
+
+            _logger.LogInformation("Refresh worker accepting work");
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -248,9 +389,17 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
                 try
                 {
                     request = await _queue.Reader.ReadAsync(stoppingToken);
-                    Interlocked.Decrement(ref _queueDepth);
+                    lock (_gate)
+                    {
+                        _queueDepth--;
+                    }
                 }
                 catch (OperationCanceledException)
+                {
+                    _concurrency.Release();
+                    break;
+                }
+                catch (ChannelClosedException)
                 {
                     _concurrency.Release();
                     break;
@@ -267,12 +416,23 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
         }
         finally
         {
-            _stopping = true;
-            _running = false;
+            lock (_gate)
+            {
+                if (Phase != WorkerPhase.Stopped)
+                {
+                    Volatile.Write(ref _phase, (int)WorkerPhase.Stopping);
+                }
+
+                _queue.Writer.TryComplete();
+            }
 
             while (_queue.Reader.TryRead(out var unprocessed))
             {
-                Interlocked.Decrement(ref _queueDepth);
+                lock (_gate)
+                {
+                    _queueDepth--;
+                }
+
                 ReleaseReservation(unprocessed.Location);
             }
 
@@ -288,6 +448,11 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
                 {
                     _logger.LogWarning(ex, "In-flight captures did not stop cleanly");
                 }
+            }
+
+            lock (_gate)
+            {
+                Volatile.Write(ref _phase, (int)WorkerPhase.Stopped);
             }
         }
 
@@ -314,9 +479,12 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         deadline.CancelAfter(_captureTimeout);
 
-        if (_reservations.TryGetValue(location.Key, out var reservation))
+        lock (_gate)
         {
-            reservation.StartedAtUtc = startedAt;
+            if (_reservations.TryGetValue(location.Key, out var reservation))
+            {
+                reservation.StartedAtUtc = startedAt;
+            }
         }
 
         try
@@ -419,7 +587,7 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
         return TimeSpan.FromSeconds(seconds);
     }
 
-    private async Task UpdateStateAsync(
+    private async Task<bool> UpdateStateAsync(
         LocationId location,
         Action<LocationRuntimeState> update,
         CancellationToken cancellationToken)
@@ -439,32 +607,79 @@ public sealed class CacheRefreshService : BackgroundService, ICacheRefreshQueue
             state.UpdatedAt = _clock.UtcNow;
         }
 
-        await _stateStore.SaveAsync(state, cancellationToken);
+        bool persisted;
+        try
+        {
+            persisted = await _stateStore.SaveAsync(state, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist runtime state for {Location}", location);
+            return false;
+        }
+
+        if (!persisted)
+        {
+            _logger.LogWarning(
+                "Runtime state for {Location} is live but was not persisted; durable status may be stale",
+                location);
+        }
+
+        return persisted;
     }
 
     private void ReleaseReservation(LocationId location)
     {
-        _reservations.TryRemove(location.Key, out _);
+        lock (_gate)
+        {
+            _reservations.TryRemove(location.Key, out _);
+        }
     }
+
+    private static LocationRuntimeState CopyState(LocationRuntimeState state) => new()
+    {
+        Suburb = state.Suburb,
+        State = state.State,
+        LastAttemptAt = state.LastAttemptAt,
+        LastSuccessfulCaptureAt = state.LastSuccessfulCaptureAt,
+        LatestObservationAt = state.LatestObservationAt,
+        NextRetryAt = state.NextRetryAt,
+        UpdateFailed = state.UpdateFailed,
+        ErrorCode = state.ErrorCode,
+        Error = state.Error,
+        ConsecutiveFailures = state.ConsecutiveFailures,
+        UpdatedAt = state.UpdatedAt
+    };
 
     private Task DeleteAbandonedStagingAsync(string stagingDirectory)
     {
+        var folderName = Path.GetFileName(stagingDirectory.TrimEnd(Path.DirectorySeparatorChar));
+        var relativePath = $"{FilePathHelper.StagingDirectoryName}/{folderName}";
+        var cacheRoot = _cacheService.GetCacheDirectory();
+
         try
         {
-            var stagingRoot = FilePathHelper.GetStagingRoot(_cacheService.GetCacheDirectory());
-            if (FilePathHelper.TryResolveDirectChild(
-                    stagingRoot,
-                    Path.GetFileName(stagingDirectory.TrimEnd(Path.DirectorySeparatorChar)),
-                    out var resolved,
-                    out _))
+            if (FilePathHelper.TryDeleteOwnedTree(cacheRoot, relativePath, out var error))
             {
-                Directory.Delete(resolved!.FullPath, recursive: true);
-                _logger.LogDebug("Removed abandoned staging directory: {Folder}", resolved.FolderName);
+                _logger.LogDebug("Removed abandoned staging directory: {Folder}", folderName);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Refusing to remove abandoned staging directory {Folder}: {Error}",
+                    relativePath,
+                    error);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to remove abandoned staging directory: {Folder}", stagingDirectory);
+            _logger.LogWarning(ex,
+                "Failed to remove abandoned staging directory {Folder}; nothing else was deleted",
+                relativePath);
         }
 
         return Task.CompletedTask;

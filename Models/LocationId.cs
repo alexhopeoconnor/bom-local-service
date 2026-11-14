@@ -11,6 +11,8 @@ namespace BomLocalService.Models;
 public sealed class LocationId : IEquatable<LocationId>
 {
     public const int MaxSuburbLength = 120;
+    private const int MaxCacheBasenameBytes = 255;
+    private const int StagingSuffixBytes = 8;
 
     private LocationId(string suburb, string state)
     {
@@ -89,6 +91,11 @@ public sealed class LocationId : IEquatable<LocationId>
             return false;
         }
 
+        if (!TryValidateCacheBasenameCapacity(normalizedSuburb, normalizedState, out error))
+        {
+            return false;
+        }
+
         location = new LocationId(normalizedSuburb, normalizedState);
         return true;
     }
@@ -136,6 +143,57 @@ public sealed class LocationId : IEquatable<LocationId>
         }
 
         return builder.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// Rejects a location whose final or actual staging basename would exceed the
+    /// filesystem name limit. This is deliberately non-recursive: it must not call
+    /// the folder parser, because that parser calls TryCreate.
+    /// </summary>
+    private static bool TryValidateCacheBasenameCapacity(
+        string suburb,
+        string state,
+        out string? error)
+    {
+        error = null;
+
+        // Legacy underscores represent spaces. A literal underscore or comma is
+        // lossy, and a leading dot would be treated as a reserved cache directory,
+        // so LocationHelper will use the reversible v2 shape.
+        var usesLegacy = !suburb.StartsWith(".", StringComparison.Ordinal) &&
+                         !suburb.Contains('_') &&
+                         !suburb.Contains(',');
+        string basename;
+        if (usesLegacy)
+        {
+            basename = $"{SanitizeLegacyPrefix($"{suburb}_{state}")}_20000101_000000";
+        }
+        else
+        {
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(suburb))
+                .TrimEnd('=')
+                .Replace('+', '-')
+                .Replace('/', '_');
+            basename = $"v2~{encoded}~{state}~20000101~000000";
+        }
+
+        var finalBytes = Encoding.UTF8.GetByteCount(basename);
+        var stagingBytes = finalBytes + 1 + StagingSuffixBytes;
+        if (finalBytes > MaxCacheBasenameBytes || stagingBytes > MaxCacheBasenameBytes)
+        {
+            error = "Location cannot be represented in a cache folder name: final or staging basename exceeds 255 UTF-8 bytes";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static string SanitizeLegacyPrefix(string value)
+    {
+        var invalidChars = Path.GetInvalidFileNameChars();
+        return string.Join("_", value.Split(invalidChars, StringSplitOptions.RemoveEmptyEntries))
+            .Replace(" ", "_")
+            .Replace(",", "");
     }
 
     /// <summary>

@@ -2,6 +2,25 @@
 import { formatDate, getRelativeTime, setElementText, setElementHTML, getElement } from './utils.js';
 import { state } from './state.js';
 
+function buildFailureDetail(data) {
+    return {
+        text: 'Last update failed' +
+            (data.errorCode ? ` (${data.errorCode})` : '') +
+            (data.nextRetryAt ? ` • Retry after ${formatDate(data.nextRetryAt)} (${getRelativeTime(data.nextRetryAt)})` : ''),
+        title: data.error || '',
+        showEstimation: false
+    };
+}
+
+function stopPlaybackForEmptyCollection() {
+    if (state.playInterval) {
+        clearInterval(state.playInterval);
+        state.playInterval = null;
+    }
+    state.isPlaying = false;
+    setElementText('play-btn', '▶ Play');
+}
+
 /**
  * Update API connection status indicator
  */
@@ -92,9 +111,16 @@ export function updateRelativeTimes() {
         nextUpdateEl.textContent = getRelativeTime(state.radarData.nextUpdateTime);
     }
     
-    // Update update status detail with relative time
+    // Update update status detail with relative time. A stale/failed update
+    // keeps its full failure text instead of being replaced by a scheduled
+    // update message on the next one-second tick.
     if (updateStatusDetailEl) {
-        if (state.radarData.isUpdating && state.radarData.nextUpdateTime) {
+        const override = state.updateStatusDetailOverride;
+        if (override) {
+            updateStatusDetailEl.textContent = override.text;
+            updateStatusDetailEl.title = override.title || '';
+            if (estimationNoteEl) estimationNoteEl.style.display = override.showEstimation ? 'inline' : 'none';
+        } else if (state.radarData.isUpdating && state.radarData.nextUpdateTime) {
             const relativeTime = getRelativeTime(state.radarData.nextUpdateTime);
             updateStatusDetailEl.textContent = 'Update in progress • Estimated completion: ' + formatDate(state.radarData.nextUpdateTime) + ' (' + relativeTime + ')';
             updateStatusDetailEl.title = 'Estimate is based on historical metrics and current progress. Accuracy improves as more updates complete.';
@@ -189,12 +215,26 @@ export function updateUI(data) {
         // Update update status detail
         const updateStatusDetailEl = getElement('update-status-detail');
         const estimationNoteEl = getElement('estimation-note');
-        if (updateStatusDetailEl && (data.isUpdating !== undefined || data.cacheIsValid !== undefined)) {
-            if (data.updateFailed && !data.isUpdating) {
-                updateStatusDetailEl.textContent = 'Last update failed' +
-                    (data.errorCode ? ` (${data.errorCode})` : '') +
-                    (data.nextRetryAt ? ` • Retry after ${formatDate(data.nextRetryAt)} (${getRelativeTime(data.nextRetryAt)})` : '');
-                updateStatusDetailEl.title = data.error || '';
+        const hasStatus = data.isUpdating !== undefined || data.cacheIsValid !== undefined;
+        const failureDetail = data.updateFailed && !data.isUpdating
+            ? buildFailureDetail(data)
+            : null;
+
+        if (hasStatus) {
+            // Keep failure text stable while relative-time ticks run. Only clear
+            // it on an explicit healthy/unscheduled answer, not on partial data.
+            if (failureDetail) {
+                state.updateStatusDetailOverride = failureDetail;
+            } else if (data.updateFailed === false || data.cacheIsValid === true || data.isUpdating) {
+                state.updateStatusDetailOverride = null;
+            }
+        }
+
+        const effectiveFailure = state.updateStatusDetailOverride;
+        if (updateStatusDetailEl && hasStatus) {
+            if (effectiveFailure) {
+                updateStatusDetailEl.textContent = effectiveFailure.text;
+                updateStatusDetailEl.title = effectiveFailure.title;
                 if (estimationNoteEl) estimationNoteEl.style.display = 'none';
             } else if (data.isUpdating) {
                 if (data.nextUpdateTime) {
@@ -235,6 +275,18 @@ export function updateUI(data) {
     
     // Handle no frames case
     if (!data || !data.frames || data.frames.length === 0) {
+        if (data) {
+            // Keep the latest status visible to relative-time updates.
+            state.radarData = data;
+            if (data.isUpdating !== undefined || data.cacheIsValid !== undefined) {
+                if (data.updateFailed && !data.isUpdating) {
+                    state.updateStatusDetailOverride = buildFailureDetail(data);
+                } else if (data.updateFailed === false || data.cacheIsValid === true || data.isUpdating) {
+                    state.updateStatusDetailOverride = null;
+                }
+            }
+        }
+
         const currentStatus = getElement('cache-status')?.innerHTML;
         if (!currentStatus || currentStatus === 'Checking...' || currentStatus.trim() === '') {
             const statusEl = getElement('cache-status');
@@ -242,9 +294,11 @@ export function updateUI(data) {
             if (statusEl) statusEl.innerHTML = 'Generating <span class="status-badge status-updating">IN PROGRESS</span>';
             if (updateStatusDetailEl) updateStatusDetailEl.textContent = 'Cache generation in progress, please wait...';
         }
-        
+
         showNoFramesMessage('No radar frames available yet. Cache is being generated in the background. Please wait a moment and refresh.');
         state.frames = [];
+        state.currentFrameIndex = 0;
+        stopPlaybackForEmptyCollection();
         const controlsEl = getElement('frame-controls');
         if (controlsEl) controlsEl.innerHTML = '';
         setElementText('play-btn', '▶ Play');
@@ -255,6 +309,14 @@ export function updateUI(data) {
         if (prevBtn) prevBtn.disabled = true;
         if (nextBtn) nextBtn.disabled = true;
         setElementText('frame-info', 'Waiting for cache to be generated...');
+        setElementText('current-frame-time', '-');
+        setElementText('frame-progress', '');
+
+        const imgEl = getElement('radar-image');
+        if (imgEl) {
+            imgEl.style.display = 'none';
+            imgEl.removeAttribute('src');
+        }
         return;
     }
     

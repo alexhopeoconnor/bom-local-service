@@ -77,7 +77,14 @@ public class CacheCleanupService : BackgroundService, IHostedServiceRegistration
     /// </summary>
     public async Task RunCleanupAsync(CancellationToken cancellationToken = default)
     {
-        if (!Directory.Exists(_cacheService.GetCacheDirectory()))
+        var cacheRoot = _cacheService.GetCacheDirectory();
+        if (!FilePathHelper.TryValidateCacheRoot(cacheRoot, out var validatedRoot, out var rootError))
+        {
+            _logger.LogWarning("Refusing retention cleanup for an unsafe cache root: {Error}", rootError);
+            return;
+        }
+
+        if (!Directory.Exists(validatedRoot))
         {
             return;
         }
@@ -154,35 +161,71 @@ public class CacheCleanupService : BackgroundService, IHostedServiceRegistration
 
     private Task CleanupDebugFoldersAsync(DateTime cutoff, CancellationToken cancellationToken)
     {
-        var debugDir = Path.Combine(_cacheService.GetCacheDirectory(), "debug");
-        if (!Directory.Exists(debugDir))
+        var cacheRoot = _cacheService.GetCacheDirectory();
+        if (!Directory.Exists(FilePathHelper.GetDebugRoot(cacheRoot)))
         {
             return Task.CompletedTask;
         }
 
-        foreach (var directory in Directory.EnumerateDirectories(debugDir))
+        if (!FilePathHelper.TryResolveDirectChild(
+                cacheRoot,
+                FilePathHelper.DebugDirectoryName,
+                out var debugRoot,
+                out var debugRootError))
+        {
+            _logger.LogWarning("Ignoring unsafe debug directory: {Error}", debugRootError);
+            return Task.CompletedTask;
+        }
+
+        string[] directories;
+        try
+        {
+            directories = Directory.GetDirectories(debugRoot!.FullPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Could not enumerate debug directories");
+            return Task.CompletedTask;
+        }
+
+        foreach (var directory in directories)
         {
             if (cancellationToken.IsCancellationRequested)
             {
                 break;
             }
 
+            var name = Path.GetFileName(directory);
             try
             {
-                if (File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint))
+                if (FilePathHelper.IsSymlinkOrReparsePoint(directory))
+                {
+                    _logger.LogWarning("Refusing to clean symbolic-link debug directory: {Directory}", name);
+                    continue;
+                }
+
+                if (Directory.GetLastWriteTimeUtc(directory) >= cutoff)
                 {
                     continue;
                 }
 
-                if (Directory.GetLastWriteTimeUtc(directory) < cutoff)
+                if (!FilePathHelper.TryDeleteOwnedTree(
+                        cacheRoot,
+                        $"{FilePathHelper.DebugDirectoryName}/{name}",
+                        out var deleteError))
                 {
-                    Directory.Delete(directory, recursive: true);
-                    _logger.LogDebug("Deleted old debug directory: {Directory}", Path.GetFileName(directory));
+                    _logger.LogWarning(
+                        "Refusing to delete unsafe debug directory {Directory}: {Error}",
+                        name,
+                        deleteError);
+                    continue;
                 }
+
+                _logger.LogDebug("Deleted old debug directory: {Directory}", name);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                _logger.LogWarning(ex, "Failed to delete debug directory: {Directory}", directory);
+                _logger.LogWarning(ex, "Failed to delete debug directory: {Directory}", name);
             }
         }
 
@@ -193,7 +236,14 @@ public class CacheCleanupService : BackgroundService, IHostedServiceRegistration
     {
         try
         {
-            return Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories)
+            var options = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = FileAttributes.ReparsePoint
+            };
+
+            return Directory.EnumerateFiles(folderPath, "*", options)
                 .Select(file => new FileInfo(file).Length)
                 .Sum();
         }

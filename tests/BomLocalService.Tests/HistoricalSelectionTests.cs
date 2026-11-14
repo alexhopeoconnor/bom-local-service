@@ -7,6 +7,23 @@ namespace BomLocalService.Tests;
 
 public class HistoricalSelectionTests
 {
+    [Theory]
+    [InlineData("not-a-date", null, "startTime")]
+    [InlineData(null, "not-a-date", "endTime")]
+    public async Task Malformed_bounds_return_top_level_validation_errors(
+        string? start, string? end, string field)
+    {
+        await using var app = new BomServiceFactory();
+        using var client = app.CreateClient();
+        using var response = await GetTimeSeriesRaw(client, "Pomona", "QLD", start, end);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("VALIDATION_ERROR", json.RootElement.GetProperty("errorCode").GetString());
+        Assert.False(json.RootElement.TryGetProperty("value", out _));
+        Assert.Contains(field, json.RootElement.GetProperty("message").GetString());
+    }
+
     [Fact]
     public async Task Observation_bounds_are_inclusive_and_not_limited_by_folder_capture_time()
     {

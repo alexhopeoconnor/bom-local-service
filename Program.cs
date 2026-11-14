@@ -1,6 +1,7 @@
 using BomLocalService.Extensions;
 using BomLocalService.Services;
 using BomLocalService.Services.Interfaces;
+using BomLocalService.Utilities;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -55,11 +56,42 @@ app.MapGet("/api/ready", (ICacheRefreshQueue refreshQueue, ICacheService cacheSe
     try
     {
         var cacheDirectory = cacheService.GetCacheDirectory();
-        Directory.CreateDirectory(cacheDirectory);
-        var probe = Path.Combine(cacheDirectory, $".readiness-{Guid.NewGuid():N}.tmp");
-        File.WriteAllText(probe, "ok");
-        File.Delete(probe);
-        checks["cacheWritable"] = true;
+        var relativeProbe = $".readiness-{Guid.NewGuid():N}.tmp";
+
+        // Never recreate the configured root here. A missing or replaced root
+        // must fail closed rather than being repaired by the readiness probe.
+        if (!FilePathHelper.TryResolveOwnedPath(
+                cacheDirectory,
+                relativeProbe,
+                allowMissingLeaf: true,
+                out var probe,
+                out var probeError))
+        {
+            checks["cacheWritable"] = false;
+            cacheError = probeError ?? "UNSAFE_CACHE_ROOT";
+        }
+        else
+        {
+            File.WriteAllText(probe!, "ok");
+
+            // Re-resolve after writing. If the root or path changed underneath
+            // us, leave the probe alone and report not-ready.
+            if (!FilePathHelper.TryResolveOwnedPath(
+                    cacheDirectory,
+                    relativeProbe,
+                    allowMissingLeaf: false,
+                    out var cleanupProbe,
+                    out var cleanupError))
+            {
+                checks["cacheWritable"] = false;
+                cacheError = cleanupError ?? "CACHE_ROOT_CHANGED";
+            }
+            else
+            {
+                File.Delete(cleanupProbe!);
+                checks["cacheWritable"] = true;
+            }
+        }
     }
     catch (Exception ex)
     {

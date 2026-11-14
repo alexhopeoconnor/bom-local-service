@@ -1,28 +1,42 @@
-// Error handling and API retry logic
-import { MAX_RETRY_ATTEMPTS, RETRY_DELAY_MS } from './config.js';
+// Error handling and API retry state
+import { MAX_RETRY_ATTEMPTS, RETRY_DELAY_MS, MAX_RETRY_DELAY_MS } from './config.js';
 import { state } from './state.js';
 import { updateApiStatus, showError, clearError } from './ui-updater.js';
-import { fetchRadarData } from './api-client.js';
-import { updateUI } from './ui-updater.js';
 
 /**
- * Reset API retry state when connection is restored
+ * Reset API retry state when a fetch succeeds.
+ * Timer ownership stays with the refresh scheduler; this only resets visible state.
  */
 export function resetApiRetryState() {
-    if (state.isApiDown) {
-        state.isApiDown = false;
-        state.retryAttempts = 0;
+    const wasDown = state.isApiDown || state.retryAttempts > 0;
+
+    state.isApiDown = false;
+    state.retryAttempts = 0;
+
+    // Clear the legacy interval in case an older page instance left one behind.
+    if (state.retryInterval) {
+        clearInterval(state.retryInterval);
+        state.retryInterval = null;
+    }
+
+    if (wasDown) {
         clearError();
-        if (state.retryInterval) {
-            clearInterval(state.retryInterval);
-            state.retryInterval = null;
-        }
         updateApiStatus('connected');
     }
 }
 
 /**
- * Handle API being down
+ * Bounded exponential backoff for connection retries.
+ */
+export function getRetryDelayMs(attempt) {
+    const safeAttempt = Math.max(1, Math.min(MAX_RETRY_ATTEMPTS, attempt));
+    return Math.min(RETRY_DELAY_MS * (2 ** (safeAttempt - 1)), MAX_RETRY_DELAY_MS);
+}
+
+/**
+ * Record a failed API fetch and return the delay the scheduler should use.
+ * The scheduler (polling.js) remains the only component that owns timers and
+ * performs fetches.
  */
 export function handleApiDown(error) {
     if (!state.isApiDown) {
@@ -30,39 +44,26 @@ export function handleApiDown(error) {
         state.retryAttempts = 0;
         updateApiStatus('disconnected');
     }
-    
+
     state.retryAttempts++;
-    showError(`API connection lost. Retrying... (Attempt ${state.retryAttempts}/${MAX_RETRY_ATTEMPTS})`);
-    
-    // Stop auto-refresh while retrying
-    if (state.refreshInterval) {
-        clearInterval(state.refreshInterval);
-        state.refreshInterval = null;
-    }
-    
-    // Start retry mechanism
-    if (!state.retryInterval && state.retryAttempts < MAX_RETRY_ATTEMPTS) {
-        state.retryInterval = setInterval(async () => {
-            if (state.retryAttempts >= MAX_RETRY_ATTEMPTS) {
-                clearInterval(state.retryInterval);
-                state.retryInterval = null;
-                showError('API connection failed after multiple attempts. Please check if the service is running.');
-                updateApiStatus('failed');
-                return;
-            }
-            
-            state.retryAttempts++;
-            showError(`API connection lost. Retrying... (Attempt ${state.retryAttempts}/${MAX_RETRY_ATTEMPTS})`);
-            
-            // Try to fetch data
-            const result = await fetchRadarData();
-            if (result.data) {
-                updateUI(result.data);
-            }
-        }, RETRY_DELAY_MS);
-    } else if (state.retryAttempts >= MAX_RETRY_ATTEMPTS) {
+
+    if (state.retryAttempts >= MAX_RETRY_ATTEMPTS) {
         showError('API connection failed after multiple attempts. Please check if the service is running.');
         updateApiStatus('failed');
+        return {
+            exhausted: true,
+            attempts: state.retryAttempts,
+            retryDelayMs: 0,
+            error: error || null
+        };
     }
-}
 
+    showError(`API connection lost. Retrying... (Attempt ${state.retryAttempts}/${MAX_RETRY_ATTEMPTS})`);
+
+    return {
+        exhausted: false,
+        attempts: state.retryAttempts,
+        retryDelayMs: getRetryDelayMs(state.retryAttempts),
+        error: error || null
+    };
+}

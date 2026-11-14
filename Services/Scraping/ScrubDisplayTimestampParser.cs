@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using BomLocalService.Models;
+using BomLocalService.Services.Browser;
 using BomLocalService.Services.Interfaces;
 using Microsoft.Playwright;
 
@@ -11,6 +12,8 @@ namespace BomLocalService.Services.Scraping;
 /// </summary>
 public class ScrubDisplayTimestampParser : IScrubDisplayTimestampParser
 {
+    private static readonly TimeSpan ReadOperationTimeout = TimeSpan.FromSeconds(10);
+
     private readonly IConfiguration _configuration;
     private readonly ScrapingSelectorsConfig _selectors;
     private readonly TextPatternsConfig _textPatterns;
@@ -34,11 +37,17 @@ public class ScrubDisplayTimestampParser : IScrubDisplayTimestampParser
         ScrapingContext? context = null,
         CancellationToken cancellationToken = default)
     {
-        _ = cancellationToken;
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             var timeLabelLocator = selectorService.GetLocator(page, _selectors.TimeDisplayLabel);
-            var timeLabel = await timeLabelLocator.TextContentAsync();
+            var timeLabel = await BoundedBrowserOperation.RunAsync(
+                timeLabelLocator.TextContentAsync(),
+                ReadOperationTimeout,
+                cancellationToken,
+                reclaim: null,
+                observe: (message, exception) => _logger.LogDebug(exception, "{Message}", message),
+                operationName: "read-scrub-display-label").ConfigureAwait(false);
             if (string.IsNullOrEmpty(timeLabel))
             {
                 _logger.LogDebug("Time display label is empty");
@@ -70,7 +79,13 @@ public class ScrubDisplayTimestampParser : IScrubDisplayTimestampParser
             {
                 try
                 {
-                    var metadataText = await page.EvaluateAsync<string>(_javaScriptTemplates.ExtractWeatherMetadata);
+                    var metadataText = await BoundedBrowserOperation.RunAsync(
+                        page.EvaluateAsync<string>(_javaScriptTemplates.ExtractWeatherMetadata),
+                        ReadOperationTimeout,
+                        cancellationToken,
+                        reclaim: null,
+                        observe: (message, exception) => _logger.LogDebug(exception, "{Message}", message),
+                        operationName: "read-scrub-display-metadata").ConfigureAwait(false);
                     if (!string.IsNullOrEmpty(metadataText))
                     {
                         if (metadataText.Contains("AEDT", StringComparison.OrdinalIgnoreCase))
@@ -78,6 +93,17 @@ public class ScrubDisplayTimestampParser : IScrubDisplayTimestampParser
                         else if (metadataText.Contains("AEST", StringComparison.OrdinalIgnoreCase))
                             detectedTimezone = "AEST";
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (PlaywrightException ex) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(
+                        "Scrub display metadata read was cancelled",
+                        ex,
+                        cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -90,6 +116,17 @@ public class ScrubDisplayTimestampParser : IScrubDisplayTimestampParser
 
             _logger.LogWarning("Failed to parse timestamp string: '{Timestamp}'", timestampStr);
             return null;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PlaywrightException ex) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                "Scrub display label read was cancelled",
+                ex,
+                cancellationToken);
         }
         catch (Exception ex)
         {
@@ -189,23 +226,36 @@ public class ScrubDisplayTimestampParser : IScrubDisplayTimestampParser
         int maxWaitMs = 5000,
         CancellationToken cancellationToken = default)
     {
-        _ = cancellationToken;
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             var startTime = DateTime.UtcNow;
             while ((DateTime.UtcNow - startTime).TotalMilliseconds < maxWaitMs)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var newTimestamp = await ReadUtcAsync(page, selectorService, context, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (newTimestamp.HasValue && newTimestamp.Value != currentTimestamp)
                     return;
 
-                await page.WaitForTimeoutAsync(200);
+                await Task.Delay(200, cancellationToken).ConfigureAwait(false);
             }
 
             _logger.LogDebug(
                 "Display label did not change from {CurrentTimestamp} within {MaxWaitMs}ms",
                 currentTimestamp,
                 maxWaitMs);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (PlaywrightException ex) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                "Waiting for the scrub display label was cancelled",
+                ex,
+                cancellationToken);
         }
         catch (Exception ex)
         {

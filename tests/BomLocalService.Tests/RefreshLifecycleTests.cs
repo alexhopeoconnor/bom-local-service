@@ -1,7 +1,11 @@
 using System.Net;
+using System.Reflection;
 using System.Text.Json;
 using BomLocalService.Models;
+using BomLocalService.Services;
 using BomLocalService.Tests.Infrastructure;
+using BomLocalService.Utilities;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace BomLocalService.Tests;
@@ -111,6 +115,58 @@ public class RefreshLifecycleTests
         var after = await ReadRadar(await GetRadar(client, "Pomona", "QLD"));
         Assert.DoesNotContain(Path.GetFileName(previous), Uri.UnescapeDataString(after.Frames[0].ImageUrl));
         Assert.Empty(Directory.GetDirectories(Path.Combine(app.CacheDirectory, ".staging")));
+    }
+
+    [Fact]
+    public async Task Abandoned_staging_cleanup_refuses_nested_symlink_and_preserves_outside_data()
+    {
+        await using var app = new BomServiceFactory();
+        var staging = Path.Combine(app.CacheDirectory, FilePathHelper.StagingDirectoryName, "Pomona_QLD_20261112_000000");
+        Directory.CreateDirectory(staging);
+
+        var outsideDirectory = Path.Combine(Path.GetTempPath(), "bom-staging-outside-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outsideDirectory);
+        var sentinel = TestCache.CreateSentinel(outsideDirectory);
+        var linkPath = Path.Combine(staging, "radar");
+
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkPath, outsideDirectory);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var refreshService = app.Services.GetRequiredService<CacheRefreshService>();
+            var method = typeof(CacheRefreshService).GetMethod(
+                "DeleteAbandonedStagingAsync",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            await (Task)method.Invoke(refreshService, new object[] { staging })!;
+
+            Assert.True(File.Exists(sentinel));
+            Assert.True(Directory.Exists(staging));
+        }
+        finally
+        {
+            if (Directory.Exists(linkPath))
+            {
+                Directory.Delete(linkPath);
+            }
+
+            if (Directory.Exists(staging))
+            {
+                Directory.Delete(staging, recursive: true);
+            }
+
+            if (Directory.Exists(outsideDirectory))
+            {
+                Directory.Delete(outsideDirectory, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -296,7 +352,14 @@ public class RefreshLifecycleTests
         await WaitUntilAsync(async () =>
         {
             var status = await GetStatus(client, "Pomona", "QLD");
-            return status?.UpdateFailed == true && status.ErrorCode == "TIMEOUT_ERROR";
+            // The worker releases its reservation only after the finally block
+            // has attempted abandoned-staging cleanup.
+            return status is
+            {
+                UpdateFailed: true,
+                ErrorCode: "TIMEOUT_ERROR",
+                IsUpdating: false
+            };
         }, TimeSpan.FromSeconds(10));
 
         var status = await GetStatus(client, "Pomona", "QLD");

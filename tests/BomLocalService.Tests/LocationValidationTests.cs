@@ -50,6 +50,25 @@ public class LocationValidationTests
     }
 
     [Fact]
+    public void Rejects_locations_whose_final_or_staging_basename_exceeds_255_utf8_bytes()
+    {
+        // 240 UTF-8 bytes in the legacy shape, or ~320 in the v2 shape.
+        Assert.False(LocationId.TryCreate(new string('é', LocationId.MaxSuburbLength), "QLD", out _, out var unicodeError));
+        Assert.Contains("255", unicodeError ?? string.Empty);
+
+        // A comma forces v2, and 239 UTF-8 bytes no longer fit the v2 basename.
+        Assert.False(LocationId.TryCreate(new string('é', LocationId.MaxSuburbLength - 1) + ",", "QLD", out _, out var lossyError));
+        Assert.Contains("255", lossyError ?? string.Empty);
+    }
+
+    [Fact]
+    public void Accepts_long_ascii_and_short_lossy_names_that_still_fit_final_and_staging()
+    {
+        Assert.True(LocationId.TryCreate(new string('a', LocationId.MaxSuburbLength), "QLD", out _, out var asciiError), asciiError ?? string.Empty);
+        Assert.True(LocationId.TryCreate(new string('a', 100) + ",", "QLD", out _, out var lossyError), lossyError ?? string.Empty);
+    }
+
+    [Fact]
     public void Identity_is_case_and_whitespace_stable()
     {
         var first = LocationId.Create("St.  Lucia", "qld");

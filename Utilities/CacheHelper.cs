@@ -1,5 +1,5 @@
-using System.Buffers.Binary;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using BomLocalService.Models;
 using Microsoft.Extensions.Configuration;
 
@@ -12,11 +12,46 @@ public sealed record SnapshotValidationResult(bool IsValid, string? ErrorCode, s
 }
 
 /// <summary>
+/// Completion marker written inside a published snapshot. The explicit
+/// suburb/state fields make new ownership exact without parsing display text.
+/// Older markers without them remain readable.
+/// </summary>
+public sealed class SnapshotMarker
+{
+    [JsonPropertyName("formatVersion")]
+    public int? FormatVersion { get; set; }
+
+    [JsonPropertyName("publishedAtUtc")]
+    public DateTime? PublishedAtUtc { get; set; }
+
+    [JsonPropertyName("location")]
+    public string? Location { get; set; }
+
+    [JsonPropertyName("suburb")]
+    public string? Suburb { get; set; }
+
+    [JsonPropertyName("state")]
+    public string? State { get; set; }
+
+    [JsonPropertyName("frameCount")]
+    public int? FrameCount { get; set; }
+}
+
+/// <summary>
 /// Utility methods for cache folder validation and operations.
 /// </summary>
 public static class CacheHelper
 {
-    private static readonly byte[] PngSignature = { 137, 80, 78, 71, 13, 10, 26, 10 };
+    public const int MaxMarkerBytes = 64 * 1024;
+    public const int MaxMetadataBytes = 256 * 1024;
+    public const int MaxFramesMetadataBytes = 256 * 1024;
+
+    private static readonly JsonSerializerOptions BoundedJsonOptions = new()
+    {
+        MaxDepth = 16,
+        AllowTrailingCommas = false,
+        PropertyNameCaseInsensitive = false
+    };
 
     public static int GetFrameCountForDataType(IConfiguration configuration, CachedDataType dataType)
     {
@@ -47,66 +82,79 @@ public static class CacheHelper
         IConfiguration configuration,
         DateTime? nowUtc = null)
     {
-        if (string.IsNullOrEmpty(cacheFolderPath) || !Directory.Exists(cacheFolderPath))
+        var fullPath = Path.GetFullPath(cacheFolderPath);
+        var root = Path.GetDirectoryName(fullPath.TrimEnd(Path.DirectorySeparatorChar)) ?? fullPath;
+        return ValidateSnapshot(root, fullPath, expectedLocation, dataType, configuration, nowUtc);
+    }
+
+    public static SnapshotValidationResult ValidateSnapshot(
+        string cacheRoot,
+        string cacheFolderPath,
+        LocationId expectedLocation,
+        CachedDataType dataType,
+        IConfiguration configuration,
+        DateTime? nowUtc = null)
+    {
+        if (!TryParseSnapshotFolderName(cacheFolderPath, out var folder) || folder is null)
         {
-            return SnapshotValidationResult.Invalid("SNAPSHOT_MISSING", "Snapshot folder does not exist");
+            return SnapshotValidationResult.Invalid("SNAPSHOT_NAME_INVALID", "Snapshot folder name is not recognised");
         }
 
-        if (FilePathHelper.IsSymlinkOrReparsePoint(cacheFolderPath))
-        {
-            return SnapshotValidationResult.Invalid("SNAPSHOT_UNSAFE", "Snapshot folder is a symbolic link");
-        }
-
-        if (!TryParseSnapshotFolderName(cacheFolderPath, out var parsed) ||
-            !parsed!.Location.Equals(expectedLocation))
+        if (!folder.Location.Equals(expectedLocation))
         {
             return SnapshotValidationResult.Invalid("SNAPSHOT_LOCATION_MISMATCH", "Snapshot does not belong to the requested location");
         }
 
-        if (!FilePathHelper.TryResolveOwnedChild(
-                Path.GetDirectoryName(cacheFolderPath) ?? cacheFolderPath,
-                cacheFolderPath,
-                "metadata.json",
-                out var metadataPath,
-                out _) ||
-            !File.Exists(metadataPath))
+        if (!FilePathHelper.TryResolveDirectChild(
+                cacheRoot,
+                folder.FolderName,
+                out var resolved,
+                out var resolveError))
         {
-            return SnapshotValidationResult.Invalid("METADATA_MISSING", "metadata.json is missing or unsafe");
+            return SnapshotValidationResult.Invalid("SNAPSHOT_UNSAFE", resolveError ?? "Snapshot folder is missing or unsafe");
         }
 
-        LastUpdatedInfo? metadata;
-        try
+        if (!TryResolveSnapshotIdentity(cacheRoot, folder, out var identity, out var identityError) ||
+            identity is null ||
+            !identity.Equals(expectedLocation))
         {
-            metadata = JsonSerializer.Deserialize<LastUpdatedInfo>(File.ReadAllText(metadataPath!));
-        }
-        catch (Exception)
-        {
-            return SnapshotValidationResult.Invalid("METADATA_INVALID", "metadata.json is not readable");
+            return SnapshotValidationResult.Invalid(
+                "SNAPSHOT_LOCATION_MISMATCH",
+                identityError ?? "Snapshot identity does not match the requested location");
         }
 
-        if (metadata is null || !IsUsableTimestamp(metadata.ObservationTime, nowUtc))
+        var metadataRelative = $"{folder.FolderName}/metadata.json";
+        if (!FilePathHelper.TryResolveOwnedPath(cacheRoot, metadataRelative, allowMissingLeaf: false, out var metadataPath, out var metadataError))
+        {
+            return SnapshotValidationResult.Invalid("METADATA_MISSING", metadataError ?? "metadata.json is missing or unsafe");
+        }
+
+        if (!TryReadBoundedJson<LastUpdatedInfo>(metadataPath!, MaxMetadataBytes, out var metadata, out var metadataReadError) ||
+            metadata is null)
+        {
+            return SnapshotValidationResult.Invalid("METADATA_INVALID", metadataReadError ?? "metadata.json is not readable");
+        }
+
+        if (!IsUsableTimestamp(metadata.ObservationTime, nowUtc))
         {
             return SnapshotValidationResult.Invalid("METADATA_INVALID", "metadata observation time is missing or unusable");
         }
 
-        var framesPath = FilePathHelper.GetFramesMetadataFilePath(cacheFolderPath, dataType);
-        if (FilePathHelper.IsSymlinkOrReparsePoint(framesPath) || !File.Exists(framesPath))
+        var dataTypeFolder = dataType.ToString().ToLowerInvariant();
+        var framesRelative = $"{folder.FolderName}/{dataTypeFolder}/frames.json";
+        if (!FilePathHelper.TryResolveOwnedPath(cacheRoot, framesRelative, allowMissingLeaf: false, out var framesPath, out var framesError))
         {
-            return SnapshotValidationResult.Invalid("FRAMES_METADATA_MISSING", "frames.json is missing or unsafe");
+            return SnapshotValidationResult.Invalid("FRAMES_METADATA_MISSING", framesError ?? "frames.json is missing or unsafe");
         }
 
-        List<FrameMetadata>? frameMetadata;
-        try
+        if (!TryReadBoundedJson<List<FrameMetadata?>>(framesPath!, MaxFramesMetadataBytes, out var frameMetadata, out var framesReadError) ||
+            frameMetadata is null)
         {
-            frameMetadata = JsonSerializer.Deserialize<List<FrameMetadata>>(File.ReadAllText(framesPath));
-        }
-        catch (Exception)
-        {
-            return SnapshotValidationResult.Invalid("FRAMES_METADATA_INVALID", "frames.json is not readable");
+            return SnapshotValidationResult.Invalid("FRAMES_METADATA_INVALID", framesReadError ?? "frames.json is not readable");
         }
 
         var expectedFrameCount = GetFrameCountForDataType(configuration, dataType);
-        if (frameMetadata is null || frameMetadata.Count != expectedFrameCount)
+        if (frameMetadata.Count != expectedFrameCount)
         {
             return SnapshotValidationResult.Invalid("FRAME_COUNT_MISMATCH", "frames.json does not describe the configured frame count");
         }
@@ -114,9 +162,12 @@ public static class CacheHelper
         var seen = new HashSet<int>();
         foreach (var frame in frameMetadata)
         {
-            if (frame.FrameIndex < 0 || frame.FrameIndex >= expectedFrameCount || !seen.Add(frame.FrameIndex))
+            if (frame is null ||
+                frame.FrameIndex < 0 ||
+                frame.FrameIndex >= expectedFrameCount ||
+                !seen.Add(frame.FrameIndex))
             {
-                return SnapshotValidationResult.Invalid("FRAME_INDEX_INVALID", "frames.json contains an invalid or duplicate frame index");
+                return SnapshotValidationResult.Invalid("FRAME_INDEX_INVALID", "frames.json contains an invalid, null, or duplicate frame index");
             }
 
             if (!IsUsableTimestamp(frame.ObservationTime, nowUtc))
@@ -132,25 +183,98 @@ public static class CacheHelper
 
         for (var index = 0; index < expectedFrameCount; index++)
         {
-            var framePath = FilePathHelper.GetFrameFilePath(cacheFolderPath, dataType, index);
-            if (FilePathHelper.IsSymlinkOrReparsePoint(framePath) || !File.Exists(framePath))
+            var frameRelative = $"{folder.FolderName}/{dataTypeFolder}/frame_{index}.png";
+            if (!FilePathHelper.TryResolveOwnedPath(cacheRoot, frameRelative, allowMissingLeaf: false, out var framePath, out var frameError) ||
+                !File.Exists(framePath))
             {
-                return SnapshotValidationResult.Invalid("FRAME_MISSING", $"frame_{index}.png is missing or unsafe");
+                return SnapshotValidationResult.Invalid("FRAME_MISSING", frameError ?? $"frame_{index}.png is missing or unsafe");
             }
 
-            if (!IsValidPng(framePath))
+            if (!PngValidationHelper.IsValidPng(framePath!))
             {
                 return SnapshotValidationResult.Invalid("FRAME_INVALID", $"frame_{index}.png is not a readable PNG image");
             }
         }
 
-        var markerPath = FilePathHelper.GetSnapshotCompleteMarkerPath(cacheFolderPath);
-        if (File.Exists(markerPath) && FilePathHelper.IsSymlinkOrReparsePoint(markerPath))
+        var markerRelative = $"{folder.FolderName}/.complete";
+        if (!FilePathHelper.TryResolveOwnedPath(cacheRoot, markerRelative, allowMissingLeaf: true, out var markerPath, out var markerError))
         {
-            return SnapshotValidationResult.Invalid("SNAPSHOT_UNSAFE", "completion marker is a symbolic link");
+            return SnapshotValidationResult.Invalid("SNAPSHOT_UNSAFE", markerError ?? "completion marker is unsafe");
+        }
+
+        if (Directory.Exists(markerPath))
+        {
+            return SnapshotValidationResult.Invalid("SNAPSHOT_UNSAFE", "completion marker is not a file");
         }
 
         return SnapshotValidationResult.Valid();
+    }
+
+    /// <summary>
+    /// Resolves the exact identity from the reversible folder name and, when
+    /// present, cross-checks an explicit identity in the completion marker.
+    /// Legacy markers without suburb/state are never parsed as identity text.
+    /// </summary>
+    public static bool TryResolveSnapshotIdentity(
+        string cacheRoot,
+        ParsedCacheFolder folder,
+        out LocationId? identity,
+        out string? error)
+    {
+        identity = null;
+        error = null;
+
+        if (folder.IsStaging)
+        {
+            identity = folder.Location;
+            return true;
+        }
+
+        var markerRelative = $"{folder.FolderName}/.complete";
+        if (!FilePathHelper.TryResolveOwnedPath(cacheRoot, markerRelative, allowMissingLeaf: true, out var markerPath, out error))
+        {
+            return false;
+        }
+
+        if (Directory.Exists(markerPath))
+        {
+            error = "Completion marker is not a file";
+            return false;
+        }
+
+        if (!File.Exists(markerPath))
+        {
+            identity = folder.Location;
+            return true;
+        }
+
+        if (!TryReadBoundedJson<SnapshotMarker>(markerPath!, MaxMarkerBytes, out var marker, out var markerError) ||
+            marker is null)
+        {
+            error = markerError ?? "Completion marker is not readable";
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(marker.Suburb) && !string.IsNullOrWhiteSpace(marker.State))
+        {
+            if (!LocationId.TryCreate(marker.Suburb, marker.State, out var markerLocation, out var locationError))
+            {
+                error = locationError ?? "Completion marker identity is invalid";
+                return false;
+            }
+
+            if (!markerLocation!.Equals(folder.Location))
+            {
+                error = "Completion marker identity does not match the folder name";
+                return false;
+            }
+
+            identity = markerLocation;
+            return true;
+        }
+
+        identity = folder.Location;
+        return true;
     }
 
     /// <summary>
@@ -159,12 +283,14 @@ public static class CacheHelper
     /// </summary>
     public static bool IsCacheFolderCompleteForDataType(string cacheFolderPath, CachedDataType dataType, IConfiguration configuration)
     {
-        if (!LocationHelper.TryParseCacheFolderName(Path.GetFileName(cacheFolderPath.TrimEnd(Path.DirectorySeparatorChar)), out var parsed))
+        if (!TryParseSnapshotFolderName(cacheFolderPath, out var parsed))
         {
             return false;
         }
 
-        return ValidateSnapshot(cacheFolderPath, parsed!.Location, dataType, configuration).IsValid;
+        var fullPath = Path.GetFullPath(cacheFolderPath);
+        var root = Path.GetDirectoryName(fullPath.TrimEnd(Path.DirectorySeparatorChar)) ?? fullPath;
+        return ValidateSnapshot(root, fullPath, parsed!.Location, dataType, configuration).IsValid;
     }
 
     public static bool IsCacheFolderComplete(string cacheFolderPath, IConfiguration configuration) =>
@@ -183,56 +309,65 @@ public static class CacheHelper
 
     /// <summary>
     /// Parses a final snapshot name or a staging name with an 8+ hex suffix.
+    /// The reversible v2 grammar, when present, supplies an exact LocationId
+    /// without reading the completion marker.
     /// </summary>
     public static bool TryParseSnapshotFolderName(string folderPath, out ParsedCacheFolder? parsed)
     {
         var baseName = Path.GetFileName(folderPath.TrimEnd(Path.DirectorySeparatorChar));
-        if (LocationHelper.TryParseCacheFolderName(baseName, out parsed))
-        {
-            return true;
-        }
-
-        var separator = baseName.LastIndexOf('_');
-        if (separator <= 0)
-        {
-            parsed = null;
-            return false;
-        }
-
-        var suffix = baseName[(separator + 1)..];
-        if (suffix.Length >= 8 && suffix.All(Uri.IsHexDigit))
-        {
-            return LocationHelper.TryParseCacheFolderName(baseName[..separator], out parsed);
-        }
-
-        parsed = null;
-        return false;
+        return LocationHelper.TryParseCacheFolderName(baseName, allowStaging: true, out parsed);
     }
 
-    private static bool IsValidPng(string path)
+    public static bool IsValidPng(string path) => PngValidationHelper.IsValidPng(path);
+
+    public static bool TryReadBoundedJson<T>(
+        string path,
+        int maxBytes,
+        out T? value,
+        out string? error)
     {
+        value = default;
+        error = null;
+
         try
         {
-            using var stream = File.OpenRead(path);
-            if (stream.Length < 24)
+            var info = new FileInfo(path);
+            if (!info.Exists)
             {
+                error = "File does not exist";
                 return false;
             }
 
-            Span<byte> header = stackalloc byte[24];
-            stream.ReadExactly(header);
-
-            if (!header[..8].SequenceEqual(PngSignature))
+            if (info.Length <= 0)
             {
+                error = "File is empty";
                 return false;
             }
 
-            var width = BinaryPrimitives.ReadUInt32BigEndian(header[16..20]);
-            var height = BinaryPrimitives.ReadUInt32BigEndian(header[20..24]);
-            return width > 0 && height > 0;
+            if (info.Length > maxBytes)
+            {
+                error = "File is larger than the allowed limit";
+                return false;
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            value = JsonSerializer.Deserialize<T>(stream, BoundedJsonOptions);
+            if (value is null)
+            {
+                error = "JSON value is null";
+                return false;
+            }
+
+            return true;
         }
-        catch (Exception)
+        catch (JsonException ex)
         {
+            error = $"JSON is invalid: {ex.Message}";
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            error = $"File could not be read: {ex.Message}";
             return false;
         }
     }
