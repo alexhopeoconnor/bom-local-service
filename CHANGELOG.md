@@ -45,6 +45,10 @@ recovery and progression criteria must be demonstrated before qualification.
 
 ### Fixed
 
+- Explicitly grant runtime users execution access to the packaged Playwright
+  Node driver. Native image smoke launches it through an ordinary child process
+  so a direct container-exec success cannot hide application permission errors.
+
 - Added rejection and isolation checks for wildcard, traversal, absolute-path,
   wrong-location, reserved-directory and nested snapshot symlink requests.
   Focused outside-sentinel cases pass.

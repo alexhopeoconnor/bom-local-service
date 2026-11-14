@@ -107,6 +107,12 @@ RUN dotnet --list-runtimes | grep -E '^Microsoft\.AspNetCore\.App 10\.'
 # Copy published app
 COPY --from=publish /app/publish .
 
+# The published Playwright driver's bundled Node is observed at 0744
+# root:root, so a non-root runtime user (compose runs uid 1000) cannot
+# execute it and Playwright.CreateAsync fails with EACCES.  Normalise the
+# bundled Node binaries so the driver can be launched by that user.
+RUN chmod a+rx /app/.playwright/node/*/node
+
 # Create cache directory for screenshots
 RUN mkdir -p /app/cache && chmod 777 /app/cache
 

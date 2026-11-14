@@ -1,6 +1,6 @@
 # Local service qualification
 
-Status: **implementation in progress; unreleased and unqualified; audited runner gate passed; build passed; regression and service verification in progress**.
+Status: **unreleased and unqualified; deterministic and browser checks passed; live qualification found an image permission defect; corrected candidate preparation pending**.
 
 This document tracks the agreed service-only 20-step plan. Card and Home Assistant
 implementation are deferred. Publication, GitHub writes and live deployment are
@@ -100,6 +100,27 @@ is frozen. A resolved policy is copied and hashed into the candidate manifest;
 preliminary baseline reports are not qualification evidence. The final trial
 must use the same retained image bytes and the frozen policy/configuration.
 
+## Candidate preparation findings
+
+Signed source `0b148723a1149349ababdb56ceb0c7c443f462c5` passed all
+125 deterministic cases and ten browser cases, with no skips and verified owned
+teardown. Its retained amd64 image
+`sha256:118b23e51e0ace997c266e0abef11eba7b398d13f1d3b8dd5732bd3f4f8188ef`
+was built once, exported, reloaded and tested. The image is **not qualified**:
+a real service capture failed to launch the bundled Playwright Node process.
+The executable was root-owned mode `0744`, while the disposable service runs as
+the host UID. Direct Docker exec had succeeded despite an ordinary shell child
+and the application's child launch failing with permission denied. The image
+smoke must therefore exercise an ordinary child launch, and the packaged driver
+must explicitly permit execution by the runtime user. The failed image/archive
+and diagnostic reports are retained; correction requires a new signed source and
+image identity. No 30-hour trial has started.
+
+Evidence: `artifacts/qualification/0b148723a114-preparation/` and
+`artifacts/execution/node-diagnosis/`; the two diagnostic runner IDs are
+`20261114T191323Z-83657e28` and `20261114T191417Z-56e25127`. Both completed with
+verified cleanup, as did the failed live run `20261114T190813Z-87975a34`.
+
 ## Ordered completion register
 
 | Step | Requirement | Current status | Expected evidence |
@@ -118,9 +139,9 @@ must use the same retained image bytes and the frozen policy/configuration.
 | 12 | Provenance-aware live verifier | 70 pure checks pass across shared verifier/soak code; live verification unexecuted | Negative fixtures and candidate report |
 | 13 | Honest soak metrics and qualification | Actual-loop simulations pass after summary and progression corrections; no real trial run | Duration/interruption/recovery fixtures |
 | 14 | CI checks and unconditional teardown | Local checks and workflow integration pass; GitHub jobs not dispatched | Workflow validation and local equivalent checks |
-| 15 | Exact-image promotion automation | Preparation/promotion helpers verified; image export/promotion unexecuted | Candidate exports and promotion checks |
-| 16 | Signed source and frozen candidate | Signed implementation checkpoint 18f5655; final freeze pending | Signature output; candidate manifest |
-| 17 | Native amd64 image and two locations | Unverified; ARM64 deferred | amd64 and per-location reports |
+| 15 | Exact-image promotion automation | Exact amd64 image exported and reloaded; promotion unexecuted | Candidate exports and promotion checks |
+| 16 | Signed source and frozen candidate | Signed source through 0b14872; its retained image failed live qualification; replacement required | Signature output; candidate manifest |
+| 17 | Native amd64 image and two locations | Seeded image smoke passed; real capture found Node permission failure; two-location checks pending; ARM64 deferred | amd64 and per-location reports |
 | 18 | Fault/restart/upgrade/rollback | Helper implemented; 27 pure tests pass; mutation boundary reviewed; live exercises unverified | Isolated exercise reports |
 | 19 | Complete 30-hour trial | Not started | Samples, summary and teardown report |
 | 20 | Evidence and publication material | Pending qualification | Release notes and gap list |

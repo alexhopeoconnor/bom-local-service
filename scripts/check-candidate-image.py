@@ -400,8 +400,14 @@ def main() -> int:
         browser_result = None
         last_error = None
         for node_path in node_paths:
+            # Launch through an ordinary shell child so the normal child
+            # execution path checks the runtime user's filesystem permission
+            # (observed 0744 root:root), matching .NET's Process.Start.
             completed = run_bounded(
-                ["docker", "exec", "-i", container_id, node_path],
+                [
+                    "docker", "exec", "-i", container_id,
+                    "sh", "-c", 'exec "$@"', "bom-node", node_path,
+                ],
                 timeout=BROWSER_TIMEOUT,
                 input_bytes=JS_PAYLOAD.encode("utf-8"),
                 max_output=32 * 1024 * 1024,
