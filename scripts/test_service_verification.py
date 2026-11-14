@@ -461,13 +461,276 @@ class BackoffTests(unittest.TestCase):
         self.assertEqual(tracker.history[0]["durationSeconds"], 60.0)
 
 
+class MetricBindingTests(unittest.TestCase):
+    RUN_ID = "20260101T000000Z-aaaaaaaa"
+    CONTAINER_ID = "c" * 64
+    IMAGE_ID = "sha256:" + "b" * 64
+    TOKEN = "d" * 64
+
+    def manifest(self) -> dict:
+        return {
+            "runId": self.RUN_ID,
+            "ownerToken": self.TOKEN,
+            "mode": "container",
+            "network": {"host": "127.0.0.1", "port": 18082},
+            "container": {
+                "imageId": self.IMAGE_ID,
+                "project": "bom-local-test-abcdef123456",
+                "dockerEnv": {"DOCKER_HOST": "unix:///tmp/test.sock"},
+                "endpoint": "daemon|runner|2.0.0",
+            },
+        }
+
+    def make_run_dir(self, root: Path) -> Path:
+        run_dir = root / "artifacts" / "execution" / "runner" / "runs" / self.RUN_ID
+        run_dir.mkdir(parents=True)
+        (run_dir / "ownership.json").write_text("{}\n", encoding="utf-8")
+        return run_dir
+
+    def binding(self, root: Path, **overrides: object) -> dict:
+        manifest = self.manifest()
+        values: dict[str, object] = {
+            "load_manifest": manifest,
+            "docker_endpoint_matches": {"ok": True, "endpoint": manifest["container"]["endpoint"]},
+            "verify_container_inventory": {
+                "ok": True,
+                "containerIds": [self.CONTAINER_ID],
+                "containers": [{"id": self.CONTAINER_ID, "role": "service"}],
+            },
+            "verify_container_id": {
+                "ok": True,
+                "id": self.CONTAINER_ID,
+                "data": {"Id": self.CONTAINER_ID, "Image": self.IMAGE_ID},
+            },
+            "docker_env_from_manifest": {
+                "PATH": "/usr/bin",
+                "DOCKER_HOST": "unix:///tmp/test.sock",
+            },
+        }
+        values.update(overrides)
+        with ExitStack() as stack:
+            for name, value in values.items():
+                stack.enter_context(mock.patch.object(sv.runner, name, return_value=value))
+            return sv.load_metric_binding(root, self.RUN_ID, self.TOKEN)
+
+    def test_verified_binding_records_exact_ids_and_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_run_dir(root)
+            binding = self.binding(root)
+        self.assertTrue(binding["bound"], binding["error"])
+        self.assertEqual(binding["containerId"], self.CONTAINER_ID)
+        self.assertEqual(binding["imageId"], self.IMAGE_ID)
+        self.assertEqual(binding["endpoint"], "daemon|runner|2.0.0")
+        self.assertEqual(binding["baseUrl"], "http://127.0.0.1:18082")
+        self.assertEqual(binding["dockerEnvKeys"], ["DOCKER_HOST"])
+        described = sv.describe_metric_binding(binding)
+        self.assertNotIn("dockerEnv", described)
+        self.assertTrue(described["ownerTokenMatches"])
+
+    def test_wrong_endpoint_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_run_dir(root)
+            binding = self.binding(root, docker_endpoint_matches={
+                "ok": False, "error": "docker endpoint identity changed",
+            })
+        self.assertFalse(binding["bound"])
+        self.assertIn("endpoint", binding["error"])
+
+    def test_wrong_labels_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_run_dir(root)
+            binding = self.binding(root, verify_container_inventory={
+                "ok": False,
+                "containerIds": [],
+                "containers": [],
+                "errors": ["container ownership token label mismatch"],
+            })
+        self.assertFalse(binding["bound"])
+        self.assertIn("label mismatch", binding["error"])
+
+    def test_wrong_image_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_run_dir(root)
+            binding = self.binding(root, verify_container_id={
+                "ok": True,
+                "id": self.CONTAINER_ID,
+                "data": {"Id": self.CONTAINER_ID, "Image": "sha256:" + "e" * 64},
+            })
+        self.assertFalse(binding["bound"])
+        self.assertIn("image id", binding["error"])
+
+    def test_manifest_network_must_be_approved_loopback(self) -> None:
+        manifest = self.manifest()
+        manifest["network"] = {"host": "0.0.0.0", "port": 18082}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_run_dir(root)
+            binding = self.binding(root, load_manifest=manifest)
+        self.assertFalse(binding["bound"])
+        self.assertIn("IPv4 runner host", binding["error"])
+
+    def test_container_count_and_role_are_exact(self) -> None:
+        cases = {
+            "two containers": {
+                "ok": True,
+                "containerIds": [self.CONTAINER_ID, "f" * 64],
+                "containers": [
+                    {"id": self.CONTAINER_ID, "role": "service"},
+                    {"id": "f" * 64, "role": "service"},
+                ],
+            },
+            "wrong role": {
+                "ok": True,
+                "containerIds": [self.CONTAINER_ID],
+                "containers": [{"id": self.CONTAINER_ID, "role": "test"}],
+            },
+        }
+        for label, inventory in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_run_dir(root)
+                binding = self.binding(root, verify_container_inventory=inventory)
+                self.assertFalse(binding["bound"])
+                self.assertEqual(binding["containerId"], None if label == "two containers" else self.CONTAINER_ID)
+
+    def test_invalid_run_id_never_invokes_runner_helpers(self) -> None:
+        with mock.patch.object(sv.runner, "load_manifest") as load:
+            binding = sv.load_metric_binding(Path("/tmp"), "ambient-container")
+        self.assertFalse(binding["bound"])
+        load.assert_not_called()
+
+    def fake_docker_exec(self, *, token: str | None = None):
+        project = "bom-local-test-abcdef123456"
+
+        def exec_fn(argv, timeout=20, env=None):
+            if argv[:2] == ["docker", "info"]:
+                return {"ok": True, "stdout": "daemon|runner|2.0.0\n"}
+            if argv[:2] == ["docker", "ps"]:
+                return {"ok": True, "stdout": self.CONTAINER_ID + "\n"}
+            if argv[:3] == ["docker", "network", "ls"]:
+                return {"ok": True, "stdout": ""}
+            if argv[:3] == ["docker", "container", "inspect"]:
+                labels = {
+                    sv.runner.RUN_ID_LABEL: self.RUN_ID,
+                    sv.runner.TOKEN_LABEL: token or self.TOKEN,
+                    sv.runner.RUNNER_LABEL: sv.runner.RUNNER_VERSION,
+                    sv.runner.PROJECT_LABEL: project,
+                    sv.runner.ROLE_LABEL: "service",
+                }
+                data = [{
+                    "Id": self.CONTAINER_ID,
+                    "Image": self.IMAGE_ID,
+                    "Config": {"Labels": labels},
+                    "State": {"Status": "running", "ExitCode": 0},
+                }]
+                return {"ok": True, "stdout": json.dumps(data)}
+            return {"ok": False, "stdout": "", "stderr": f"unexpected command: {argv}"}
+
+        return exec_fn
+
+    def test_runner_read_only_helpers_bind_happy_path_and_reject_wrong_label(self) -> None:
+        for token, expected in ((self.TOKEN, True), ("e" * 64, False)):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.make_run_dir(root)
+                with mock.patch.object(sv.runner, "load_manifest", return_value=self.manifest()):
+                    binding = sv.load_metric_binding(
+                        root, self.RUN_ID, self.TOKEN,
+                        exec_fn=self.fake_docker_exec(token=token),
+                    )
+                self.assertEqual(binding["bound"], expected, binding.get("error"))
+                if not expected:
+                    self.assertIn("label mismatch", binding["error"])
+
+    def test_metric_provenance_accepts_legitimate_pair(self) -> None:
+        binding = {
+            "bound": True,
+            "imageId": self.IMAGE_ID,
+            "baseUrl": "http://127.0.0.1:18082",
+        }
+        candidate = {
+            "selectedImage": {"imageId": self.IMAGE_ID},
+            "actualImageId": self.IMAGE_ID,
+        }
+        self.assertEqual(sv.metric_provenance_mismatches(
+            candidate, binding, "http://127.0.0.1:18082/",
+        ), [])
+
+    def test_metric_provenance_rejects_image_mismatch(self) -> None:
+        binding = {
+            "bound": True,
+            "imageId": self.IMAGE_ID,
+            "baseUrl": "http://127.0.0.1:18082",
+        }
+        candidate = {
+            "selectedImage": {"imageId": "sha256:" + "e" * 64},
+            "actualImageId": "sha256:" + "e" * 64,
+        }
+        errors = sv.metric_provenance_mismatches(candidate, binding, "http://127.0.0.1:18082")
+        self.assertTrue(any("candidate image" in error for error in errors))
+
+    def test_metric_provenance_rejects_base_url_mismatch(self) -> None:
+        binding = {
+            "bound": True,
+            "imageId": self.IMAGE_ID,
+            "baseUrl": "http://127.0.0.1:18082",
+        }
+        candidate = {
+            "selectedImage": {"imageId": self.IMAGE_ID},
+            "actualImageId": self.IMAGE_ID,
+        }
+        errors = sv.metric_provenance_mismatches(candidate, binding, "http://127.0.0.1:19999")
+        self.assertTrue(any("base URL" in error for error in errors))
+
+
+class MetricSamplingTests(unittest.TestCase):
+    def test_sampling_uses_exact_container_and_pinned_env(self) -> None:
+        calls: list[tuple[list[str], float, dict | None]] = []
+
+        def fake_exec(argv, timeout=20, env=None):
+            calls.append((argv, timeout, env))
+            if argv[1] == "stats":
+                return {"ok": True, "stdout": "100MiB / 2GiB\n"}
+            if "ps -eo" in argv[-1]:
+                return {"ok": True, "stdout": "7\n"}
+            return {"ok": True, "stdout": "12345\n"}
+
+        env = {"PATH": "/usr/bin", "DOCKER_HOST": "unix:///tmp/test.sock"}
+        with mock.patch.object(sv.runner, "exec_capture", side_effect=fake_exec):
+            result = sv.sample_resources("c" * 64, env)
+        self.assertEqual(result, (100 * 1024**2, 7, 12345))
+        self.assertEqual(len(calls), 3)
+        for argv, _timeout, call_env in calls:
+            self.assertEqual(argv[0], "docker")
+            self.assertIn("c" * 64, argv)
+            self.assertEqual(call_env, env)
+            self.assertNotIn(argv[1], {"start", "stop", "rm", "kill"})
+
+    def test_non_exact_id_never_invokes_docker(self) -> None:
+        with mock.patch.object(sv.runner, "exec_capture") as exec_mock:
+            result = sv.sample_resources("bom-local-service", {"PATH": "/usr/bin"})
+        self.assertEqual(result, (None, None, None))
+        exec_mock.assert_not_called()
+
+
 class SoakLoopTests(unittest.TestCase):
     """Drive the real CLI/loop/summary with a fake clock and transport only."""
 
-    def run_soak(self, *, hours=30, interval=1800, mode="healthy"):
+    RUN_ID = "20260101T000000Z-aaaaaaaa"
+    CONTAINER_ID = "c" * 64
+    IMAGE_ID = "sha256:" + "b" * 64
+
+    def run_soak(self, *, hours=30, interval=1800, mode="healthy", run_id=RUN_ID,
+                 policy_overrides=None, binding=None, candidate_image=None,
+                 base_url="http://127.0.0.1:18082"):
         elapsed = 0.0
         epoch = datetime(2026, 1, 1, tzinfo=timezone.utc)
         handlers = {}
+        self.last_sample_calls = []
 
         def sleep(seconds):
             nonlocal elapsed
@@ -494,25 +757,49 @@ class SoakLoopTests(unittest.TestCase):
         def image(*args, **kwargs):
             return 200, b"broken" if mode == "image-recovery" and elapsed == 0 else make_png(), {}
 
+        def sample(*args, **kwargs):
+            self.last_sample_calls.append((args, kwargs))
+            return 1024**2, 3, 1024
+
         policy = {
             "qualificationDurationSeconds": 108000,
             "maxFreshnessSeconds": 1800, "futureSkewSeconds": 120,
             "recoverySeconds": 1800, "maxProgressGapSeconds": 3600,
             "requestConnectTimeoutSeconds": 5, "requestTimeoutSeconds": 30,
             "cpuLimit": 2.0, "memoryLimitBytes": 2 * 1024**3,
+            "maxMemoryMiB": 1024, "maxBrowserProcesses": 10, "maxCacheGrowthMiB": 10,
             "unresolvedCriteria": [],
         }
+        policy.update(policy_overrides or {})
+        metric_binding = binding or {
+            "bound": True,
+            "runId": self.RUN_ID,
+            "containerId": self.CONTAINER_ID,
+            "imageId": self.IMAGE_ID,
+            "dockerEnv": {"PATH": "/usr/bin"},
+            "endpoint": "daemon|runner|2.0.0",
+            "baseUrl": "http://127.0.0.1:18082",
+        }
+        selected_image = candidate_image or self.IMAGE_ID
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(sv.os.environ, {
+                "BOM_TEST_RUN_ID": "", "BOM_TEST_OWNER_TOKEN": "",
+            }))
             mocks = {
                 "collect_git_identity": {"return_value": {"dirty": False}},
-                "load_candidate_identity": {"return_value": {"identityComplete": True}},
+                "load_candidate_identity": {"return_value": {
+                    "identityComplete": True,
+                    "selectedImage": {"imageId": selected_image},
+                    "actualImageId": selected_image,
+                }},
                 "source_matches_candidate": {"return_value": True},
                 "collect_script_identity": {"return_value": {}},
                 "collect_tool_identity": {"return_value": {}},
                 "load_candidate_policy": {"return_value": (policy, [])},
+                "load_metric_binding": {"return_value": metric_binding},
                 "request_json": {"side_effect": request},
                 "fetch_bounded": {"side_effect": image},
-                "sample_resources": {"return_value": (1024**2, 3, 1024)},
+                "sample_resources": {"side_effect": sample},
                 "utc_now": {"side_effect": now},
             }
             for name, options in mocks.items():
@@ -521,12 +808,15 @@ class SoakLoopTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(sv.time, "sleep", side_effect=sleep))
             stack.enter_context(mock.patch.object(sv.signal, "signal", side_effect=lambda sig, fn: handlers.update({sig: fn})))
             stack.enter_context(redirect_stdout(io.StringIO()))
-            code = sv.main([
-                "soak", "--base-url", "http://example.test", "--output", tmp,
+            args = [
+                "soak", "--base-url", base_url, "--output", tmp,
                 "--duration-hours", str(hours), "--interval-seconds", str(interval),
-                "--container", "fixture", "--max-memory-mib", "1024",
+                "--max-memory-mib", "1024",
                 "--max-browser-processes", "10", "--max-cache-growth-mib", "10",
-            ])
+            ]
+            if run_id is not None:
+                args += ["--run-id", run_id]
+            code = sv.main(args)
             summary = json.loads((Path(tmp) / "summary.json").read_text())
         return code, summary
 
@@ -536,6 +826,13 @@ class SoakLoopTests(unittest.TestCase):
         self.assertEqual(summary["validatedSamples"], summary["successfulSamples"])
         self.assertTrue(summary["qualification"]["eligible"])
         self.assertGreaterEqual(summary["actualElapsedSeconds"], 108000)
+        self.assertEqual(summary["memoryBytesBaseline"], 1024**2)
+        self.assertEqual(summary["memoryBytesStart"], 1024**2)
+        self.assertEqual(summary["memoryBytesEnd"], 1024**2)
+        self.assertGreater(summary["metricSamples"], 0)
+        self.assertEqual(summary["metricBinding"]["containerId"], self.CONTAINER_ID)
+        self.assertEqual(summary["metricBinding"]["baseUrl"], "http://127.0.0.1:18082")
+        self.assertEqual(summary["provenanceErrors"], [])
 
     def test_gap_before_an_advancing_sample_is_retained(self):
         code, summary = self.run_soak(interval=3700)
@@ -569,6 +866,36 @@ class SoakLoopTests(unittest.TestCase):
                     self.assertTrue(summary["interrupted"])
                     self.assertFalse(summary["completedRequestedDuration"])
 
+    def test_missing_metric_binding_is_visible_and_never_samples(self):
+        code, summary = self.run_soak(run_id=None)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["metricsComplete"])
+        self.assertEqual(summary["metricSamples"], 0)
+        self.assertFalse(summary["metricBinding"]["bound"])
+        self.assertFalse(summary["qualification"]["eligible"])
+        self.assertTrue(any(
+            "not bound" in reason for reason in summary["qualification"]["reasons"]
+        ))
+        self.assertEqual(self.last_sample_calls, [])
+
+    def test_runtime_resource_threshold_mismatch_blocks_qualification(self):
+        code, summary = self.run_soak(policy_overrides={"maxMemoryMiB": 512})
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["qualification"]["eligible"])
+        self.assertTrue(any("maxMemoryMiB" in error for error in summary["policyErrors"]))
+
+    def test_candidate_image_provenance_mismatch_blocks_qualification(self):
+        code, summary = self.run_soak(candidate_image="sha256:" + "e" * 64)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["qualification"]["eligible"])
+        self.assertTrue(any("candidate image" in error for error in summary["provenanceErrors"]))
+
+    def test_base_url_provenance_mismatch_blocks_qualification(self):
+        code, summary = self.run_soak(base_url="http://127.0.0.1:19999")
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["qualification"]["eligible"])
+        self.assertTrue(any("base URL" in error for error in summary["provenanceErrors"]))
+
 
 class QualificationTests(unittest.TestCase):
     def policy(self, **overrides: object) -> dict:
@@ -597,7 +924,20 @@ class QualificationTests(unittest.TestCase):
             "maxForwardGapSeconds": 60,
             "currentFailureSeconds": None,
             "metricsComplete": True,
+            "metricBinding": {"bound": True},
+            "metricSamples": 10,
+            "memoryBytesBaseline": 900 * 1024,
+            "memoryBytesStart": 950 * 1024,
+            "memoryBytesEnd": 1024 * 1024,
             "maxMemoryBytes": 1024 * 1024,
+            "browserProcessesBaseline": 2,
+            "browserProcessesStart": 3,
+            "browserProcessesEnd": 3,
+            "maxBrowserProcesses": 3,
+            "cacheBytesBaseline": 1000,
+            "cacheBytesStart": 1024,
+            "cacheBytesEnd": 2048,
+            "maxCacheGrowthBytes": 1048,
             "candidateIdentityComplete": True,
             "sourceMatchesCandidate": True,
             "sourceDirty": False,
@@ -671,6 +1011,49 @@ class QualificationTests(unittest.TestCase):
         )
         self.assertFalse(result["eligible"])
         self.assertIn("maxMemoryMiB", result["unresolvedCriteria"])
+
+    def test_null_container_metrics_cannot_pass_even_when_flagged_complete(self) -> None:
+        for field in ("maxMemoryBytes", "maxBrowserProcesses", "cacheBytesEnd", "memoryBytesBaseline"):
+            with self.subTest(field=field):
+                result = sv.evaluate_qualification(
+                    self.summary(**{field: None}), self.policy(), smoke=False,
+                )
+                self.assertFalse(result["eligible"])
+                self.assertTrue(any("missing" in reason for reason in result["reasons"]))
+
+    def test_peak_cache_growth_is_used_not_only_end_minus_start(self) -> None:
+        result = sv.evaluate_qualification(
+            self.summary(cacheBytesEnd=1100, maxCacheGrowthBytes=600 * 1024**2),
+            self.policy(), smoke=False,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertTrue(any("cache growth" in reason for reason in result["reasons"]))
+
+    def test_runtime_resource_thresholds_must_match_candidate_policy(self) -> None:
+        policy = {"maxMemoryMiB": 512, "maxBrowserProcesses": 4, "maxCacheGrowthMiB": 128}
+        self.assertEqual(sv.resource_policy_mismatches(policy, {
+            "maxMemoryMiB": 512, "maxBrowserProcesses": 4, "maxCacheGrowthMiB": 128,
+        }), [])
+        errors = sv.resource_policy_mismatches(policy, {
+            "maxMemoryMiB": 1024, "maxBrowserProcesses": 4, "maxCacheGrowthMiB": 128,
+        })
+        self.assertTrue(errors)
+        self.assertIn("maxMemoryMiB", errors[0])
+        self.assertTrue(sv.resource_policy_mismatches({}, {
+            "maxMemoryMiB": 1024, "maxBrowserProcesses": None, "maxCacheGrowthMiB": None,
+        }))
+        self.assertEqual(sv.resource_policy_mismatches({}, {
+            "maxMemoryMiB": None, "maxBrowserProcesses": None, "maxCacheGrowthMiB": None,
+        }), [])
+        self.assertTrue(sv.resource_policy_mismatches(
+            {"maxMemoryMiB": -1}, {"maxMemoryMiB": -1},
+        ))
+        self.assertTrue(sv.resource_policy_mismatches(
+            {"maxMemoryMiB": 512}, {"maxMemoryMiB": float("inf")},
+        ))
+        self.assertTrue(sv.resource_policy_mismatches(
+            {"maxMemoryMiB": float("nan")}, {"maxMemoryMiB": 512},
+        ))
 
     def test_smoke_is_not_qualification(self) -> None:
         result = sv.evaluate_qualification(self.summary(), self.policy(), smoke=True)

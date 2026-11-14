@@ -115,7 +115,7 @@ must use the same retained image bytes and the frozen policy/configuration.
 | 9 | Durable monitoring and DELETE | Durable save, failure, DELETE and restart assertions passed | Save-failure, DELETE and restart tests |
 | 10 | Demo recovery and polling | Six demo browser scenarios passed across initial/focused runs | Browser assertions |
 | 11 | Explicit browser execution | Ten cases executed with no skips; owned teardown verified | Dedicated browser TRX and cleanup |
-| 12 | Provenance-aware live verifier | 50 pure checks pass across shared verifier/soak code; live verification unexecuted | Negative fixtures and candidate report |
+| 12 | Provenance-aware live verifier | 70 pure checks pass across shared verifier/soak code; live verification unexecuted | Negative fixtures and candidate report |
 | 13 | Honest soak metrics and qualification | Actual-loop simulations pass after summary and progression corrections; no real trial run | Duration/interruption/recovery fixtures |
 | 14 | CI checks and unconditional teardown | Local checks and workflow integration pass; GitHub jobs not dispatched | Workflow validation and local equivalent checks |
 | 15 | Exact-image promotion automation | Preparation/promotion helpers verified; image export/promotion unexecuted | Candidate exports and promotion checks |

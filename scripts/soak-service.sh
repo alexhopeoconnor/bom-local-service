@@ -11,6 +11,8 @@ SUBURB="Pomona"
 STATE="QLD"
 INTERVAL_SECONDS="60"
 CONTAINER=""
+RUN_ID="${BOM_TEST_RUN_ID:-}"
+OWNER_TOKEN="${BOM_TEST_OWNER_TOKEN:-}"
 MAX_FRESHNESS_SECONDS="1800"
 FUTURE_SKEW_SECONDS="120"
 MAX_NO_PROGRESS_SECONDS="3600"
@@ -40,7 +42,9 @@ Options:
   --suburb NAME                  Location suburb (default: Pomona)
   --state ABBR                   Location state (default: QLD)
   --interval-seconds N           Sampling interval (default: 60)
-  --container NAME               Docker container for memory/process/cache sampling
+  --run-id ID                    Verified runner run id (default: BOM_TEST_RUN_ID)
+  --owner-token TOKEN            Expected runner owner token (default: BOM_TEST_OWNER_TOKEN)
+  --container ID                 Deprecated: must equal the verified full container id
   --max-freshness-seconds N      Recorded freshness policy (default: 1800)
   --future-skew-seconds N        Allowed future timestamp skew (default: 120)
   --max-no-progress-seconds N    No-forward-progress gate (default: 3600)
@@ -59,9 +63,10 @@ Options:
   -h, --help                     Show this help
 
 A qualification run requires 30h actual monotonic elapsed time, a validated
-image each sample, forward observation progress, complete container metrics,
-candidate identity, and explicitly supplied empirical resource thresholds.
-Short or interrupted runs cannot qualify.
+image each sample, forward observation progress, complete container metrics
+from a verified runner run/token manifest with the exact full container and
+image id, candidate identity, and explicitly supplied empirical resource
+thresholds. Short or interrupted runs cannot qualify.
 USAGE
 }
 
@@ -74,6 +79,8 @@ while [[ $# -gt 0 ]]; do
     --state) STATE="${2:-}"; shift 2 ;;
     --interval-seconds) INTERVAL_SECONDS="${2:-}"; shift 2 ;;
     --container) CONTAINER="${2:-}"; shift 2 ;;
+    --run-id) RUN_ID="${2:-}"; shift 2 ;;
+    --owner-token) OWNER_TOKEN="${2:-}"; shift 2 ;;
     --max-freshness-seconds) MAX_FRESHNESS_SECONDS="${2:-}"; shift 2 ;;
     --future-skew-seconds) FUTURE_SKEW_SECONDS="${2:-}"; shift 2 ;;
     --max-no-progress-seconds) MAX_NO_PROGRESS_SECONDS="${2:-}"; shift 2 ;;
@@ -122,6 +129,8 @@ soak_args=(
 [[ -n "$ARCHITECTURE" ]] && soak_args+=(--architecture "$ARCHITECTURE")
 [[ -n "$IMAGE_ID" ]] && soak_args+=(--image-id "$IMAGE_ID")
 [[ -n "$IMAGE_ARCHIVE" ]] && soak_args+=(--image-archive "$IMAGE_ARCHIVE")
+[[ -n "$RUN_ID" ]] && soak_args+=(--run-id "$RUN_ID")
+[[ -n "$OWNER_TOKEN" ]] && soak_args+=(--owner-token "$OWNER_TOKEN")
 [[ -n "$MAX_MEMORY_MIB" ]] && soak_args+=(--max-memory-mib "$MAX_MEMORY_MIB")
 [[ -n "$MAX_BROWSER_PROCESSES" ]] && soak_args+=(--max-browser-processes "$MAX_BROWSER_PROCESSES")
 [[ -n "$MAX_CACHE_GROWTH_MIB" ]] && soak_args+=(--max-cache-growth-mib "$MAX_CACHE_GROWTH_MIB")

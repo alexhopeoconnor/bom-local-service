@@ -14,6 +14,7 @@ import base64
 import binascii
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -29,6 +30,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import service_test_runner as runner  # noqa: E402
+
 
 DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_PIXELS = 40_000_000
@@ -37,6 +41,8 @@ DEFAULT_MAX_METADATA_DISTANCE_SECONDS = 7200
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 CACHE_FOLDER_RE = re.compile(r"^(?P<prefix>.+)_(?P<date>\d{8})_(?P<time>\d{6})$")
 V2_FOLDER_RE = re.compile(r"^v2~(?P<suburb>[A-Za-z0-9_-]+)~(?P<state>[A-Z]{2,3})~(?P<date>\d{8})~(?P<time>\d{6})$")
+FULL_CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+METRIC_RUNS_RELATIVE = Path("artifacts") / "execution" / "runner" / "runs"
 SUPPORTED_STATES = ("QLD", "NSW", "VIC", "SA", "WA", "TAS", "NT", "ACT")
 STATE_FULL_NAMES = {
     "queensland": "QLD",
@@ -1010,6 +1016,31 @@ def policy_mismatches(policy: dict[str, Any], expected: dict[str, Any]) -> list[
     return errors
 
 
+def resource_policy_mismatches(policy: dict[str, Any], expected: dict[str, Any]) -> list[str]:
+    """Compare runtime empirical thresholds with the frozen candidate policy.
+
+    A runtime threshold that the policy does not authorise is a mismatch. An
+    absent runtime threshold plus an absent policy value stays unresolved and is
+    rejected by the local qualification gate rather than guessed here.
+    """
+    errors: list[str] = []
+    for key in ("maxMemoryMiB", "maxBrowserProcesses", "maxCacheGrowthMiB"):
+        runtime = expected.get(key)
+        if runtime is not None and _non_negative_number(runtime) is None:
+            errors.append(f"runtime {key} is not a valid non-negative number")
+            continue
+        if key not in policy:
+            if runtime is not None:
+                errors.append(f"candidate policy is missing {key}")
+            continue
+        policy_value = policy[key]
+        if policy_value is not None and _non_negative_number(policy_value) is None:
+            errors.append(f"candidate policy {key} is not a valid non-negative number")
+        elif policy_value != runtime:
+            errors.append(f"candidate policy {key}={policy_value!r} does not match runtime {runtime!r}")
+    return errors
+
+
 def validate_observation_freshness(
     observation: datetime,
     *,
@@ -1346,26 +1377,279 @@ class FailureTracker:
         return max(0.0, monotonic - float(self.current["startedMonotonic"]))
 
 
-def docker_value(container: str, command: list[str]) -> str | None:
-    if not container:
-        return None
+def _metric_error(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def load_metric_binding(
+    repo_root: Path,
+    run_id: str,
+    owner_token: str | None = None,
+    exec_fn: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve one exact runner-owned service container for metric sampling.
+
+    This is read-only. It loads the runner manifest, verifies the pinned Docker
+    endpoint and inspects only resources carrying the exact run/token labels.
+    It never starts, stops, removes or prunes anything.
+    """
+    run_id = (run_id or "").strip()
+    if not runner.RUN_ID_RE.fullmatch(run_id):
+        return {
+            "bound": False,
+            "runId": run_id or None,
+            "error": "metric sampling requires a generated runner run id",
+        }
+    run_dir = Path(repo_root).resolve() / METRIC_RUNS_RELATIVE / run_id
+    manifest_path = run_dir / "ownership.json"
     try:
-        result = subprocess.run(
-            ["docker", *command], check=False, capture_output=True, text=True, timeout=20
+        if not manifest_path.is_file() or manifest_path.is_symlink():
+            raise VerificationError(f"ownership manifest is missing or unsafe: {manifest_path}")
+        manifest = runner.load_manifest(run_dir, require_binding=True)
+    except Exception as exc:  # noqa: BLE001 - bind failure is evidence, not a guess
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "error": _metric_error(exc),
+        }
+
+    errors: list[str] = []
+    if manifest.get("mode") != "container":
+        errors.append("ownership manifest is not a container run")
+    if manifest.get("runId") != run_id:
+        errors.append("ownership manifest run id does not match")
+    manifest_token = str(manifest.get("ownerToken") or "")
+    if not runner.TOKEN_RE.fullmatch(manifest_token):
+        errors.append("ownership manifest owner token is malformed")
+    if owner_token is not None and manifest_token != owner_token:
+        errors.append("ownership manifest owner token does not match the supplied token")
+    container_manifest = manifest.get("container")
+    if not isinstance(container_manifest, dict):
+        errors.append("ownership manifest has no container identity")
+        container_manifest = {}
+    expected_image = str(container_manifest.get("imageId") or "")
+    if not runner.IMAGE_ID_RE.fullmatch(expected_image):
+        errors.append("ownership manifest image id is not exact")
+    network = manifest.get("network")
+    network_base: str | None = None
+    if not isinstance(network, dict):
+        errors.append("ownership manifest has no network identity")
+    else:
+        network_host = str(network.get("host") or "")
+        network_port = network.get("port")
+        if network_host != "127.0.0.1":
+            errors.append(
+                f"ownership manifest network host is not the approved IPv4 runner host: {network_host!r}"
+            )
+        if (isinstance(network_port, bool) or not isinstance(network_port, int)
+                or not 1 <= network_port <= 65535):
+            errors.append("ownership manifest network port is invalid")
+        elif network_host == "127.0.0.1":
+            network_base = f"http://{network_host}:{network_port}"
+    if errors:
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": None,
+            "imageId": None,
+            "baseUrl": network_base,
+            "error": "; ".join(errors),
+        }
+
+    endpoint = runner.docker_endpoint_matches(manifest, exec_fn=exec_fn)
+    if not endpoint.get("ok"):
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": None,
+            "imageId": None,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": f"pinned Docker endpoint cannot be verified: {endpoint.get('error')}",
+        }
+
+    inventory = runner.verify_container_inventory(manifest, exec_fn=exec_fn)
+    if not inventory.get("ok"):
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": None,
+            "imageId": None,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": "owned container inventory is not verifiable: "
+                     + "; ".join(str(item) for item in inventory.get("errors") or ["unknown failure"]),
+        }
+    container_ids = inventory.get("containerIds") or []
+    if len(container_ids) != 1:
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": None,
+            "imageId": None,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": f"expected exactly one owned container, found {len(container_ids)}",
+        }
+    container_id = str(container_ids[0])
+    if not FULL_CONTAINER_ID_RE.fullmatch(container_id):
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": container_id,
+            "imageId": None,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": f"owned container id is not an exact full id: {container_id!r}",
+        }
+    roles = [
+        str(item.get("role"))
+        for item in inventory.get("containers") or []
+        if isinstance(item, dict) and item.get("id") == container_id
+    ]
+    if roles != ["service"]:
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": container_id,
+            "imageId": None,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": f"owned container role is not service: {roles!r}",
+        }
+
+    verified = runner.verify_container_id(manifest, "container", container_id, exec_fn=exec_fn)
+    if not verified.get("ok"):
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": container_id,
+            "imageId": None,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": "owned container identity cannot be verified: "
+                     + "; ".join(str(item) for item in verified.get("errors") or ["unknown failure"]),
+        }
+    data = verified.get("data") or {}
+    image_id = str(data.get("Image") or "")
+    if not runner.IMAGE_ID_RE.fullmatch(image_id) or image_id != expected_image:
+        return {
+            "bound": False,
+            "runId": run_id,
+            "manifestPath": str(manifest_path),
+            "manifestSha256": sha256_file(manifest_path),
+            "containerId": container_id,
+            "imageId": image_id,
+            "endpoint": endpoint.get("endpoint"),
+            "baseUrl": network_base,
+            "error": f"owned container image id {image_id!r} does not match manifest {expected_image!r}",
+        }
+
+    docker_env = runner.docker_env_from_manifest(manifest)
+    return {
+        "bound": True,
+        "runId": run_id,
+        "manifestPath": str(manifest_path),
+        "manifestSha256": sha256_file(manifest_path),
+        "ownerTokenMatches": True,
+        "containerId": container_id,
+        "imageId": image_id,
+        "endpoint": endpoint.get("endpoint"),
+        "baseUrl": network_base,
+        "dockerEnvKeys": sorted(key for key in docker_env if key.upper().startswith("DOCKER_")),
+        "dockerEnv": docker_env,
+        "error": None,
+    }
+
+
+def describe_metric_binding(binding: dict[str, Any]) -> dict[str, Any]:
+    """Return the evidence-safe binding view without the pinned environment values."""
+    keys = (
+        "bound", "runId", "manifestPath", "manifestSha256", "ownerTokenMatches",
+        "containerId", "imageId", "endpoint", "baseUrl", "dockerEnvKeys", "error",
+    )
+    return {key: binding.get(key) for key in keys if key in binding}
+
+
+def metric_provenance_mismatches(
+    candidate: dict[str, Any], binding: dict[str, Any], base_url: str
+) -> list[str]:
+    """Fail closed unless bound metrics and the HTTP target share provenance."""
+    if binding.get("bound") is not True:
+        return ["container metric binding is not verified"]
+    errors: list[str] = []
+    bound_image = str(binding.get("imageId") or "")
+    selected = candidate.get("selectedImage")
+    candidate_image = str(selected.get("imageId") or "") if isinstance(selected, dict) else ""
+    if not bound_image:
+        errors.append("bound container image id is missing")
+    elif not candidate_image:
+        errors.append("candidate selected image id is missing")
+    elif bound_image != candidate_image:
+        errors.append(
+            f"bound container image {bound_image!r} does not match candidate image {candidate_image!r}"
         )
-        return result.stdout.strip() if result.returncode == 0 else None
-    except Exception:  # noqa: BLE001 - a missing metric is recorded, not hidden
+    supplied_image = candidate.get("actualImageId")
+    if supplied_image is not None and bound_image != supplied_image:
+        errors.append(
+            f"bound container image {bound_image!r} does not match supplied image id {supplied_image!r}"
+        )
+    expected_base = str(binding.get("baseUrl") or "")
+    normalized_base = (base_url or "").rstrip("/")
+    if not expected_base:
+        errors.append("runner manifest network base URL is missing or invalid")
+    elif normalized_base != expected_base:
+        errors.append(
+            f"base URL {normalized_base!r} does not match runner manifest {expected_base!r}"
+        )
+    return errors
+
+
+def docker_value(container_id: str, command: list[str], docker_env: dict[str, str]) -> str | None:
+    if not FULL_CONTAINER_ID_RE.fullmatch(container_id or ""):
         return None
+    if not isinstance(docker_env, dict):
+        return None
+    result = runner.exec_capture(["docker", *command], timeout=20, env=docker_env)
+    if not result.get("ok"):
+        return None
+    return (result.get("stdout") or "").strip()
 
 
-def sample_resources(container: str) -> tuple[int | None, int | None, int | None]:
-    memory = parse_memory(docker_value(container, ["stats", "--no-stream", "--format", "{{.MemUsage}}", container]))
-    processes_text = docker_value(container, ["exec", container, "sh", "-c", "ps -eo comm | grep -Ec '^(chrome|chromium|headless_shell)$' || true"])
+def sample_resources(container_id: str, docker_env: dict[str, str]) -> tuple[int | None, int | None, int | None]:
+    """Sample only the verified full container id through its pinned Docker env."""
+    memory = parse_memory(docker_value(
+        container_id, ["stats", "--no-stream", "--format", "{{.MemUsage}}", container_id], docker_env
+    ))
+    processes_text = docker_value(
+        container_id,
+        ["exec", container_id, "sh", "-c", "ps -eo comm | grep -Ec '^(chrome|chromium|headless_shell)$' || true"],
+        docker_env,
+    )
     try:
         processes = int(processes_text) if processes_text is not None else None
     except ValueError:
         processes = None
-    cache_text = docker_value(container, ["exec", container, "sh", "-c", "du -sb /app/cache 2>/dev/null | cut -f1"])
+    cache_text = docker_value(
+        container_id,
+        ["exec", container_id, "sh", "-c", "du -sb /app/cache 2>/dev/null | cut -f1"],
+        docker_env,
+    )
     try:
         cache_bytes = int(cache_text) if cache_text else None
     except ValueError:
@@ -1373,63 +1657,124 @@ def sample_resources(container: str) -> tuple[int | None, int | None, int | None
     return memory, processes, cache_bytes
 
 
+def _non_negative_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
 def evaluate_qualification(summary: dict[str, Any], policy: dict[str, Any], smoke: bool) -> dict[str, Any]:
     """Pure gate used by the soak and its unit tests."""
     reasons: list[str] = []
     unresolved: list[str] = []
-    elapsed = summary.get("actualElapsedSeconds", summary.get("elapsedSeconds", 0))
+    elapsed_value = summary.get("actualElapsedSeconds", summary.get("elapsedSeconds"))
+    elapsed = _non_negative_number(elapsed_value)
     if smoke:
         reasons.append("smoke run is not qualification evidence")
     if summary.get("interrupted"):
         reasons.append("interrupted before completion")
-    if elapsed < policy["requiredSeconds"]:
-        reasons.append(f"actual elapsed {elapsed:.0f}s is below required {policy['requiredSeconds']}s")
-    if elapsed < policy["requestedSeconds"]:
-        reasons.append("actual elapsed is below requested duration")
-    if summary.get("validatedSamples", 0) == 0:
+    if elapsed is None:
+        reasons.append("actual elapsed time is missing or invalid")
+    else:
+        if elapsed < policy["requiredSeconds"]:
+            reasons.append(f"actual elapsed {elapsed:.0f}s is below required {policy['requiredSeconds']}s")
+        if elapsed < policy["requestedSeconds"]:
+            reasons.append("actual elapsed is below requested duration")
+
+    validated = summary.get("validatedSamples")
+    if isinstance(validated, bool) or not isinstance(validated, int) or validated <= 0:
         reasons.append("no validated frame")
-    if summary.get("observationRegressions", 0) > 0:
+    regressions = summary.get("observationRegressions")
+    if isinstance(regressions, bool) or not isinstance(regressions, int) or regressions < 0:
+        reasons.append("observation regression evidence is missing or invalid")
+    elif regressions > 0:
         reasons.append("observation time regressed")
-    since_forward = summary.get("secondsSinceLastForward")
-    if since_forward is not None and since_forward > policy["maxNoProgressSeconds"]:
+    advances = summary.get("observationAdvances")
+    if isinstance(advances, bool) or not isinstance(advances, int) or advances <= 0:
+        reasons.append("no forward observation progress was recorded")
+
+    since_forward = _non_negative_number(summary.get("secondsSinceLastForward"))
+    if since_forward is None:
+        reasons.append("current forward-progress gap is missing")
+    elif since_forward > policy["maxNoProgressSeconds"]:
         reasons.append(f"no forward observation progress for {since_forward:.0f}s")
-    if summary.get("maxForwardGapSeconds") is not None and summary["maxForwardGapSeconds"] > policy["maxNoProgressSeconds"]:
-        reasons.append(f"historic forward-progress gap reached {summary['maxForwardGapSeconds']:.0f}s")
+    max_gap = _non_negative_number(summary.get("maxForwardGapSeconds"))
+    if max_gap is None:
+        reasons.append("historic forward-progress evidence is missing")
+    elif max_gap > policy["maxNoProgressSeconds"]:
+        reasons.append(f"historic forward-progress gap reached {max_gap:.0f}s")
+
     if summary.get("backoffErrors"):
         reasons.extend(f"backoff: {error}" for error in summary["backoffErrors"])
     if summary.get("policyErrors"):
         reasons.extend(summary["policyErrors"])
-    if summary.get("currentFailureSeconds") is not None and summary["currentFailureSeconds"] > policy["recoverySeconds"]:
+    current_failure = _non_negative_number(summary.get("currentFailureSeconds"))
+    if current_failure is not None and current_failure > policy["recoverySeconds"]:
         reasons.append("failure did not recover within the recovery window")
-    if summary.get("maxRecoverySeconds") is not None and summary["maxRecoverySeconds"] > policy["recoverySeconds"]:
+    max_recovery = _non_negative_number(summary.get("maxRecoverySeconds"))
+    if max_recovery is not None and max_recovery > policy["recoverySeconds"]:
         reasons.append("a recorded failure took longer than the recovery window to recover")
+
+    memory = _non_negative_number(summary.get("maxMemoryBytes"))
+    processes = _non_negative_number(summary.get("maxBrowserProcesses"))
+    cache_start = _non_negative_number(summary.get("cacheBytesStart"))
+    cache_end = _non_negative_number(summary.get("cacheBytesEnd"))
+    binding = summary.get("metricBinding")
+    if not isinstance(binding, dict) or binding.get("bound") is not True:
+        reasons.append("container metrics are not bound to a verified runner manifest")
     if policy.get("container"):
-        if not summary.get("metricsComplete"):
+        if summary.get("metricsComplete") is not True:
             reasons.append("container resource metrics are incomplete")
-        if summary.get("maxMemoryBytes") is None:
-            reasons.append("container memory metric is missing")
-        if summary.get("maxMemoryBytes") is not None and summary["maxMemoryBytes"] > 2 * 1024**3:
+        metric_samples = summary.get("metricSamples")
+        if isinstance(metric_samples, bool) or not isinstance(metric_samples, int) or metric_samples <= 0:
+            reasons.append("no complete container metric sample was recorded")
+        if memory is None:
+            reasons.append("container memory metric is missing or invalid")
+        elif memory > 2 * 1024**3:
             reasons.append("container memory exceeded the configured 2 GiB cap")
+        memory_baseline = _non_negative_number(summary.get("memoryBytesBaseline"))
+        memory_start = _non_negative_number(summary.get("memoryBytesStart"))
+        memory_end = _non_negative_number(summary.get("memoryBytesEnd"))
+        if memory_baseline is None:
+            reasons.append("pre-run memory baseline is missing or invalid")
+        if memory_start is None or memory_end is None:
+            reasons.append("container memory start/end samples are missing or invalid")
+        if processes is None:
+            reasons.append("container browser-process metric is missing or invalid")
+        if cache_start is None or cache_end is None:
+            reasons.append("container cache metric is missing or invalid")
     else:
         unresolved.append("container resource sampling not supplied")
+
     for key, label in (
         ("maxMemoryMiB", "maxMemoryMiB"),
         ("maxBrowserProcesses", "maxBrowserProcesses"),
         ("maxCacheGrowthMiB", "maxCacheGrowthMiB"),
     ):
-        if policy.get(key) is None:
+        value = policy.get(key)
+        if value is None:
             unresolved.append(label)
-    if policy.get("maxMemoryMiB") is not None and summary.get("maxMemoryBytes") is not None:
-        if summary["maxMemoryBytes"] > policy["maxMemoryMiB"] * 1024**2:
+        elif _non_negative_number(value) is None:
+            reasons.append(f"{label} is not a valid finite non-negative number")
+    max_memory_mib = _non_negative_number(policy.get("maxMemoryMiB"))
+    max_processes = _non_negative_number(policy.get("maxBrowserProcesses"))
+    max_cache_growth_mib = _non_negative_number(policy.get("maxCacheGrowthMiB"))
+    if max_memory_mib is not None and memory is not None:
+        if memory > max_memory_mib * 1024**2:
             reasons.append("memory exceeded the supplied empirical maximum")
-    if policy.get("maxBrowserProcesses") is not None and summary.get("maxBrowserProcesses") is not None:
-        if summary["maxBrowserProcesses"] > policy["maxBrowserProcesses"]:
+    if max_processes is not None and processes is not None:
+        if processes > max_processes:
             reasons.append("browser process count exceeded the supplied empirical maximum")
-    if policy.get("maxCacheGrowthMiB") is not None:
-        start, end = summary.get("cacheBytesStart"), summary.get("cacheBytesEnd")
-        if start is not None and end is not None and (end - start) > policy["maxCacheGrowthMiB"] * 1024**2:
+    if max_cache_growth_mib is not None:
+        growth = _non_negative_number(summary.get("maxCacheGrowthBytes"))
+        if growth is None and cache_start is not None and cache_end is not None:
+            growth = max(0.0, cache_end - cache_start)
+        if growth is not None and growth > max_cache_growth_mib * 1024**2:
             reasons.append("cache growth exceeded the supplied empirical maximum")
-    if not summary.get("candidateIdentityComplete"):
+
+    if summary.get("candidateIdentityComplete") is not True:
         reasons.append("candidate identity is incomplete or not supplied")
         reasons.extend(summary.get("candidateReasons") or [])
     if summary.get("candidateConflicts"):
@@ -1453,6 +1798,12 @@ def evaluate_qualification(summary: dict[str, Any], policy: dict[str, Any], smok
             "observationAdvances": summary.get("observationAdvances"),
             "observationRegressions": summary.get("observationRegressions"),
             "metricsComplete": summary.get("metricsComplete"),
+            "metricSamples": summary.get("metricSamples"),
+            "maxCacheGrowthBytes": summary.get("maxCacheGrowthBytes"),
+            "metricBindingBound": (
+                summary.get("metricBinding", {}).get("bound")
+                if isinstance(summary.get("metricBinding"), dict) else None
+            ),
         },
     }
 
@@ -1486,11 +1837,41 @@ def soak_command(args: argparse.Namespace) -> int:
             "cpuLimit": 2.0,
             "memoryLimitBytes": 2 * 1024**3,
         })
+        policy_errors += resource_policy_mismatches(candidate_policy, {
+            "maxMemoryMiB": args.max_memory_mib,
+            "maxBrowserProcesses": args.max_browser_processes,
+            "maxCacheGrowthMiB": args.max_cache_growth_mib,
+        })
         policy_duration = candidate_policy.get("qualificationDurationSeconds")
         if not isinstance(policy_duration, (int, float)) or policy_duration <= 0:
             policy_errors.append("candidate policy qualificationDurationSeconds is missing")
         elif duration_seconds < float(policy_duration):
             policy_errors.append("requested duration is below the candidate policy qualification duration")
+
+    run_id = (getattr(args, "run_id", None) or os.environ.get("BOM_TEST_RUN_ID") or "").strip()
+    owner_token = (getattr(args, "owner_token", None) or os.environ.get("BOM_TEST_OWNER_TOKEN") or "").strip() or None
+    legacy_container = (args.container or "").strip()
+    metric_binding: dict[str, Any] = {
+        "bound": False,
+        "runId": run_id or None,
+        "error": "runner run id was not supplied for container metric sampling",
+    }
+    if run_id:
+        metric_binding = load_metric_binding(
+            repo_root=repo_root,
+            run_id=run_id,
+            owner_token=owner_token,
+        )
+        if legacy_container and metric_binding.get("bound") and legacy_container != metric_binding.get("containerId"):
+            metric_binding = {
+                **metric_binding,
+                "bound": False,
+                "error": "--container does not match the verified full container id",
+            }
+    provenance_errors: list[str] = []
+    if metric_binding.get("bound"):
+        provenance_errors = metric_provenance_mismatches(candidate, metric_binding, args.base_url)
+    policy_errors += provenance_errors
     policy = {
         "requestedSeconds": duration_seconds,
         "requiredSeconds": required_seconds,
@@ -1498,11 +1879,25 @@ def soak_command(args: argparse.Namespace) -> int:
         "recoverySeconds": args.recovery_seconds,
         "maxFreshnessSeconds": args.max_freshness_seconds,
         "futureSkewSeconds": args.future_skew_seconds,
-        "container": args.container or None,
+        "container": bool(run_id or legacy_container),
         "maxMemoryMiB": args.max_memory_mib,
         "maxBrowserProcesses": args.max_browser_processes,
         "maxCacheGrowthMiB": args.max_cache_growth_mib,
     }
+    baseline_memory: int | None = None
+    baseline_processes: int | None = None
+    baseline_cache: int | None = None
+    baseline_error: str | None = None
+    if metric_binding.get("bound"):
+        try:
+            baseline_memory, baseline_processes, baseline_cache = sample_resources(
+                str(metric_binding["containerId"]), metric_binding["dockerEnv"]
+            )
+        except Exception as exc:  # noqa: BLE001 - a missing baseline is retained evidence
+            baseline_error = f"pre-run container baseline sampling failed: {type(exc).__name__}: {exc}"
+        else:
+            if baseline_memory is None or baseline_processes is None or baseline_cache is None:
+                baseline_error = "pre-run container baseline metrics are incomplete"
     stop = False
 
     def handle_signal(_signum: int, _frame: Any) -> None:
@@ -1546,12 +1941,18 @@ def soak_command(args: argparse.Namespace) -> int:
     max_forward_gap_seconds = 0.0
     backoff_errors: list[str] = []
     max_queue_depth = 0
-    max_memory: int | None = None
-    max_processes: int | None = None
+    max_memory: int | None = baseline_memory
+    memory_start: int | None = None
+    memory_end: int | None = None
+    max_processes: int | None = baseline_processes
+    processes_start: int | None = None
+    processes_end: int | None = None
     cache_start: int | None = None
     cache_end: int | None = None
-    metrics_complete = True
-    metric_misses = 0
+    max_cache_growth: int | None = None
+    metrics_complete = baseline_error is None
+    metric_misses = 1 if baseline_error else 0
+    metric_samples = 0
     current_error: str | None = None
     fatal_error: str | None = None
     samples_file = samples_path.open("w", encoding="utf-8")
@@ -1691,19 +2092,32 @@ def soak_command(args: argparse.Namespace) -> int:
                 current_error = frame_error or (transport_errors[-1] if transport_errors else
                                                 protocol_errors[-1] if protocol_errors else "sample not validated")
                 tracker.fail(now_wall, now_mono, current_error)
-            memory, processes, cache_bytes = sample_resources(args.container or "")
-            if args.container:
+            if metric_binding.get("bound"):
+                memory, processes, cache_bytes = sample_resources(
+                    str(metric_binding["containerId"]), metric_binding["dockerEnv"]
+                )
+            else:
+                memory = processes = cache_bytes = None
+            if policy["container"]:
                 if memory is None or processes is None or cache_bytes is None:
                     metric_misses += 1
                     metrics_complete = False
-                if cache_start is None and cache_bytes is not None:
-                    cache_start = cache_bytes
-                if cache_bytes is not None:
-                    cache_end = cache_bytes
+                else:
+                    metric_samples += 1
                 if memory is not None:
+                    memory_start = memory if memory_start is None else memory_start
+                    memory_end = memory
                     max_memory = memory if max_memory is None else max(max_memory, memory)
                 if processes is not None:
+                    processes_start = processes if processes_start is None else processes_start
+                    processes_end = processes
                     max_processes = processes if max_processes is None else max(max_processes, processes)
+                if cache_bytes is not None:
+                    cache_start = cache_bytes if cache_start is None else cache_start
+                    cache_end = cache_bytes
+                    growth_baseline = baseline_cache if baseline_cache is not None else cache_start
+                    growth = max(0, cache_bytes - growth_baseline)
+                    max_cache_growth = growth if max_cache_growth is None else max(max_cache_growth, growth)
             status_dict = status if isinstance(status, dict) else {}
             ready_dict = ready if isinstance(ready, dict) else {}
             max_queue_depth = max(max_queue_depth, int(status_dict.get("queueDepth") or ready_dict.get("queueDepth") or 0))
@@ -1789,6 +2203,7 @@ def soak_command(args: argparse.Namespace) -> int:
         "transportFailures": transport_failures,
         "backoffErrors": backoff_errors,
         "policyErrors": policy_errors,
+        "provenanceErrors": provenance_errors,
         "candidatePolicy": candidate_policy,
         "recoveries": sum(1 for item in tracker.history if item.get("recoveredAt")),
         "failureHistory": tracker.history,
@@ -1799,12 +2214,23 @@ def soak_command(args: argparse.Namespace) -> int:
         "currentError": current_error,
         "currentFailureSeconds": current_failure_seconds,
         "maxQueueDepth": max_queue_depth,
+        "memoryBytesBaseline": baseline_memory,
+        "memoryBytesStart": memory_start,
+        "memoryBytesEnd": memory_end,
         "maxMemoryBytes": max_memory,
+        "browserProcessesBaseline": baseline_processes,
+        "browserProcessesStart": processes_start,
+        "browserProcessesEnd": processes_end,
         "maxBrowserProcesses": max_processes,
+        "cacheBytesBaseline": baseline_cache,
         "cacheBytesStart": cache_start,
         "cacheBytesEnd": cache_end,
+        "maxCacheGrowthBytes": max_cache_growth,
+        "metricSamples": metric_samples,
         "metricMisses": metric_misses,
-        "metricsComplete": metrics_complete if args.container else False,
+        "metricsComplete": bool(metric_binding.get("bound") and metrics_complete and metric_samples > 0),
+        "metricBinding": describe_metric_binding(metric_binding),
+        "baselineError": baseline_error,
         "resourceCaps": {"cpu": 2.0, "memoryBytes": 2 * 1024**3, "source": "compose defaults"},
         "candidate": candidate,
         "source": source,
@@ -1892,7 +2318,9 @@ def main(argv: list[str] | None = None) -> int:
     soak.add_argument("--output", default="artifacts/soak")
     soak.add_argument("--duration-hours", type=float, default=30.0)
     soak.add_argument("--interval-seconds", type=int, default=60)
-    soak.add_argument("--container", default="")
+    soak.add_argument("--container", default="", help="Deprecated: must equal the verified full container id")
+    soak.add_argument("--run-id", default=None, help="Verified runner run id (default: BOM_TEST_RUN_ID)")
+    soak.add_argument("--owner-token", default=None, help="Expected runner owner token (default: BOM_TEST_OWNER_TOKEN)")
     soak.add_argument("--max-freshness-seconds", type=int, default=1800)
     soak.add_argument("--future-skew-seconds", type=int, default=120)
     soak.add_argument("--max-no-progress-seconds", type=int, default=3600)
