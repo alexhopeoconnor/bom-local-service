@@ -121,6 +121,18 @@ Evidence: `artifacts/qualification/0b148723a114-preparation/` and
 `20261114T191323Z-83657e28` and `20261114T191417Z-56e25127`. Both completed with
 verified cleanup, as did the failed live run `20261114T190813Z-87975a34`.
 
+The next signed source `aec02a6` corrected driver permissions. Its exact image
+`sha256:1d357152b072caecb967301d8779c51ddab285015b385031edba8b9f67619e64`
+passed the strengthened native smoke and all ten browser cases. A real Pomona
+capture then published successfully, but the verifier exhausted its own 2 GiB
+unit limit while hashing the 3.6 GiB archive with a whole-file read. The test
+unit was terminated by systemd's OOM policy and all owned resources were cleaned
+up; this was not a successful live qualification run. Archive hashing now uses
+1 MiB blocks. All 72 helper tests pass, and a real archive hash probe matched the
+retained checksum at a process peak RSS of 23796 KiB. Evidence is under
+`artifacts/execution/archive-hashing/`. The amended scripts need a new candidate
+identity before continuing qualification.
+
 ## Ordered completion register
 
 | Step | Requirement | Current status | Expected evidence |
@@ -136,7 +148,7 @@ verified cleanup, as did the failed live run `20261114T190813Z-87975a34`.
 | 9 | Durable monitoring and DELETE | Durable save, failure, DELETE and restart assertions passed | Save-failure, DELETE and restart tests |
 | 10 | Demo recovery and polling | Six demo browser scenarios passed across initial/focused runs | Browser assertions |
 | 11 | Explicit browser execution | Ten cases executed with no skips; owned teardown verified | Dedicated browser TRX and cleanup |
-| 12 | Provenance-aware live verifier | 70 pure checks pass across shared verifier/soak code; live verification unexecuted | Negative fixtures and candidate report |
+| 12 | Provenance-aware live verifier | 72 pure checks pass across shared verifier/soak code; live verification unexecuted | Negative fixtures and candidate report |
 | 13 | Honest soak metrics and qualification | Actual-loop simulations pass after summary and progression corrections; no real trial run | Duration/interruption/recovery fixtures |
 | 14 | CI checks and unconditional teardown | Local checks and workflow integration pass; GitHub jobs not dispatched | Workflow validation and local equivalent checks |
 | 15 | Exact-image promotion automation | Exact amd64 image exported and reloaded; promotion unexecuted | Candidate exports and promotion checks |

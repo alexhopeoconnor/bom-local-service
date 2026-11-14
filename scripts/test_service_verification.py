@@ -59,6 +59,25 @@ def latest_payload(now: datetime, *, count: int = 3, folder: str = "Pomona_QLD_2
     return {"frames": frames, "observationTime": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")}
 
 
+class FileHashTests(unittest.TestCase):
+    def test_hash_streams_large_files_without_unbounded_reads(self) -> None:
+        payload = b"archive-content" * 200000
+
+        class BoundedStream(io.BytesIO):
+            def read(self, size=-1):
+                if not 0 < size <= 1024 * 1024:
+                    raise AssertionError(f"unbounded archive read: {size}")
+                return super().read(size)
+
+        with mock.patch.object(Path, "open", return_value=BoundedStream(payload)), \
+                mock.patch.object(Path, "read_bytes", side_effect=AssertionError("whole-file read")):
+            self.assertEqual(sv.sha256_file(Path("candidate.tar")), hashlib.sha256(payload).hexdigest())
+
+    def test_unreadable_file_returns_no_hash(self) -> None:
+        with mock.patch.object(Path, "open", side_effect=PermissionError):
+            self.assertIsNone(sv.sha256_file(Path("unreadable.tar")))
+
+
 class PngTests(unittest.TestCase):
     def test_valid_png_decodes(self) -> None:
         result = sv.validate_png(make_png(), url="ok.png")

@@ -91,7 +91,11 @@ def sha256_bytes(data: bytes) -> str:
 
 def sha256_file(path: Path) -> str | None:
     try:
-        return sha256_bytes(path.read_bytes())
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
     except OSError:
         return None
 

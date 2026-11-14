@@ -45,6 +45,9 @@ recovery and progression criteria must be demonstrated before qualification.
 
 ### Fixed
 
+- Hash retained image archives in bounded blocks so verification does not load
+  a multi-gigabyte archive into memory.
+
 - Explicitly grant runtime users execution access to the packaged Playwright
   Node driver. Native image smoke launches it through an ordinary child process
   so a direct container-exec success cannot hide application permission errors.
